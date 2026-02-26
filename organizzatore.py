@@ -74,8 +74,6 @@ report_counts = {
 
 CURRENT_YEAR = datetime.datetime.now().year
 MANUAL_OVERRIDES = {}
-YEAR_ONLY_MODE = True
-
 
 
 def setup_logging():
@@ -122,78 +120,6 @@ def init_ocr_reader():
 
 def normalize_input_dropzone():
     return
-
-
-def normalize_overrides_csv_location():
-    """Mantiene un solo correzioni_smistamento.csv in Backup/correzioni e rimuove duplicati in input_documenti."""
-    ensure_manual_overrides_template()
-    canonical = manual_overrides_path
-    migrated = 0
-
-    for csv_path in input_path.rglob("correzioni_smistamento.csv"):
-        if csv_path.resolve() == canonical.resolve():
-            continue
-        try:
-            if csv_path.stat().st_size > 0:
-                with open(csv_path, "r", encoding="utf-8-sig", newline="") as src:
-                    rows = list(csv.DictReader(src, delimiter=";"))
-                if rows:
-                    existing_keys = set()
-                    if canonical.exists() and canonical.stat().st_size > 0:
-                        with open(canonical, "r", encoding="utf-8-sig", newline="") as dstf:
-                            for row in csv.DictReader(dstf, delimiter=";"):
-                                existing_keys.add((row.get("file") or "").strip())
-                    with open(canonical, "a", encoding="utf-8", newline="") as dstf:
-                        writer = csv.DictWriter(
-                            dstf,
-                            fieldnames=["file", "anno", "tipo_documento", "rgnr", "procura", "destinazione", "note"],
-                            delimiter=";",
-                        )
-                        for row in rows:
-                            key = (row.get("file") or "").strip()
-                            if key and key not in existing_keys:
-                                writer.writerow({k: row.get(k, "") for k in writer.fieldnames})
-                                existing_keys.add(key)
-                                migrated += 1
-            csv_path.unlink(missing_ok=True)
-        except Exception as e:
-            logging.warning("Impossibile migrare/rimuovere %s: %s", csv_path, e)
-
-    removed_dirs = 0
-    for d in sorted([x for x in input_path.rglob("*") if x.is_dir()], reverse=True):
-        if d in {input_path, error_path, duplicates_path}:
-            continue
-        try:
-            if not any(d.iterdir()):
-                d.rmdir()
-                removed_dirs += 1
-        except Exception:
-            pass
-
-    if migrated or removed_dirs:
-        logging.info("Pulizia input_documenti completata: righe migrate CSV=%d, cartelle vuote rimosse=%d", migrated, removed_dirs)
-
-
-def infer_year_fast(file_name: str, title_hints: dict, filename_info: dict, manual_override: dict | None):
-    if manual_override and manual_override.get("anno"):
-        return manual_override["anno"]
-    if title_hints.get("year") is not None:
-        return title_hints["year"]
-
-    data_rif = filename_info.get("data_riferimento_file")
-    if data_rif:
-        year_str = data_rif[-4:] if len(data_rif) >= 8 else data_rif[-2:]
-        yr = normalize_year(year_str)
-        if yr and 1980 <= yr <= CURRENT_YEAR + 1:
-            return yr
-
-    m = re.search(r"\b(19[8-9]\d|20\d{2}|2100)\b", file_name)
-    if m:
-        yy = int(m.group(1))
-        if 1980 <= yy <= CURRENT_YEAR + 1:
-            return yy
-
-    return infer_year_from_filename(file_name)
 
 
 def load_manual_overrides() -> dict:
@@ -918,7 +844,7 @@ def build_no_rule_reason(file_name: str, document_type: str, extracted_info: dic
     return " | ".join(str(x) for x in parts)
 
 
-def process_file(file_path: Path, ocr_reader, year_only: bool = YEAR_ONLY_MODE):
+def process_file(file_path: Path, ocr_reader):
     global report_counts
     file_name = file_path.name
 
@@ -942,48 +868,6 @@ def process_file(file_path: Path, ocr_reader, year_only: bool = YEAR_ONLY_MODE):
     filename_info = extract_info_from_filename(file_name)
     title_hints = parse_title_hints(file_name)
     manual_override = MANUAL_OVERRIDES.get(file_name)
-
-    if year_only:
-        dimensione = os.path.getsize(file_path)
-        data_modifica = datetime.datetime.fromtimestamp(os.path.getmtime(file_path)).strftime("%Y-%m-%d %H:%M:%S")
-        final_year = infer_year_fast(file_name, title_hints, filename_info, manual_override)
-        if not final_year:
-            move_to_error(file_path, "Modalità anno: anno non rilevato da nome file/override")
-            return
-
-        dest_root = build_dest_dir_by_year(base_path, final_year)
-        dest_root.mkdir(parents=True, exist_ok=True)
-        try:
-            shutil.move(str(file_path), str(dest_root / file_name))
-            insert_document_info(
-                nome_file=file_name,
-                rgnr=(manual_override or {}).get("rgnr") or title_hints.get("rgnr"),
-                anno=final_year,
-                procura=(manual_override or {}).get("procura"),
-                tipo_documento=(manual_override or {}).get("tipo_documento") or title_hints.get("document_type") or "Non Classificato",
-                indagato_principale=filename_info.get("indagato_principale"),
-                num_correi=filename_info.get("num_correi"),
-                operazione_nome=filename_info.get("operazione_nome"),
-                data_riferimento_file=filename_info.get("data_riferimento_file"),
-                modello_rgnr=None,
-                dimensione=dimensione,
-                data_modifica=data_modifica,
-                sha1sum=sha1sum,
-                tipo_file=detect_file_type(file_path),
-                numero_pagine=None,
-                text_source="none",
-                needs_ocr=0,
-                text_quality=0,
-                snippet_testo="",
-            )
-            report_counts["smistati_per_anno"] += 1
-            logging.info("SMISTATO (solo anno): %s -> %s", file_name, dest_root)
-        except Exception as e:
-            logging.error("ERRORE FINALE (solo anno) %s: %s", file_name, e)
-            if file_path.exists():
-                move_to_error(file_path, f"Errore finale modalità anno: {e}")
-        return
-
     text_content, moved_to_error, extraction_meta = get_text_from_file(file_path, ocr_reader)
     if moved_to_error:
         return
@@ -1102,8 +986,7 @@ def main():
     global MANUAL_OVERRIDES
 
     setup_logging()
-    normalize_overrides_csv_location()
-    ocr_reader = None if YEAR_ONLY_MODE else init_ocr_reader()
+    ocr_reader = init_ocr_reader()
 
     base_path.mkdir(parents=True, exist_ok=True)
     input_path.mkdir(parents=True, exist_ok=True)
@@ -1124,7 +1007,7 @@ def main():
 
     for file_path in files_to_process:
         if file_path.exists():
-            process_file(file_path, ocr_reader, year_only=YEAR_ONLY_MODE)
+            process_file(file_path, ocr_reader)
 
     logging.info("--- Processo Completato ---")
     print("\n--- Report Finale ---")
@@ -1136,7 +1019,6 @@ def main():
     print(f"File saltati per duplicato SHA1: {report_counts['saltati_sha1']}")
     print(f"File saltati per duplicato nome: {report_counts['saltati_nome']}")
     print(f"File duplicati archiviati: {report_counts['duplicati_archiviati']}")
-    print(f"Modalità attiva: {'solo suddivisione per anno' if YEAR_ONLY_MODE else 'analisi completa (OCR/testo)'}")
 
 
 if __name__ == "__main__":
