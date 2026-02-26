@@ -1,0 +1,158 @@
+{% extends "base.html" %}
+{% block title %}SANG_I.A. - Organizzatore{% endblock %}
+
+{% block content %}
+<div class="card" style="text-align:center;">
+  <h2>Organizzatore</h2>
+  <div class="muted">Importa i file e avvia smistamento.</div>
+</div>
+
+<div class="card">
+  <div class="row" style="align-items:center;">
+    <div class="cudaBadge">
+      <div id="cudaDot" class="dot"></div>
+      <div>
+        <div id="cudaText"><b>CUDA:</b> controllo...</div>
+        <div id="cudaSub" class="muted"></div>
+      </div>
+    </div>
+    <span class="muted" style="margin-left:auto;">Utente: <b>{{username}}</b></span>
+  </div>
+</div>
+
+<div class="card">
+  <h3>Inserire file</h3>
+  <div class="row" style="margin-top:10px;">
+    <input id="importPath" placeholder="Percorso file da importare..." style="min-width:420px;">
+    <input id="fileInput" type="file" style="display:none" />
+    <button class="secondary" id="pickImportBtn">Sfoglia...</button>
+    <button id="importBtn">Importa</button>
+  </div>
+  <div class="muted" style="margin-top:8px;" id="importInfo"></div>
+</div>
+
+<div class="card">
+  <h3>Avvia lo smistamento</h3>
+  <button id="runSmistamentoBtn">Avvia lo smistamento</button>
+</div>
+
+<div class="card">
+  <div id="status" class="statusLine">Nessuna esecuzione avviata.</div>
+  <pre id="events"></pre>
+</div>
+
+<script>
+const importInfo=document.getElementById('importInfo');
+const statusEl=document.getElementById('status');
+const eventsEl=document.getElementById('events');
+const cudaDot=document.getElementById('cudaDot');
+const cudaText=document.getElementById('cudaText');
+const cudaSub=document.getElementById('cudaSub');
+
+let currentJobId=null,lastEventCount=0,pollTimer=null;
+
+function fmtStatus(job){
+  return `JOB: ${job.job_id} | ${job.name} | STATUS: ${job.status||''} | START: ${job.started_at||''} | END: ${job.ended_at||''} | RC: ${job.returncode??''}`
+}
+function appendEvents(job){
+  const evs=job.events||[];
+  if(evs.length<=lastEventCount) return;
+  const n=evs.slice(lastEventCount);
+  lastEventCount=evs.length;
+  let t=eventsEl.textContent||'';
+  n.forEach(ev=>t+=`[${ev.ts}] ${String(ev.stream).toUpperCase()}: ${ev.line||''}\n`);
+  eventsEl.textContent=t;
+  eventsEl.scrollTop=eventsEl.scrollHeight;
+}
+async function pollJob(){
+  if(!currentJobId) return;
+  const data=await (await fetch('/api/job?id='+encodeURIComponent(currentJobId))).json();
+  if(!data.ok) return;
+  const job=data.job;
+  statusEl.textContent=fmtStatus(job);
+  appendEvents(job);
+  if(job.status==='completed'||job.status==='failed'){
+    clearInterval(pollTimer);
+    pollTimer=null;
+  }
+}
+async function refreshCuda(){
+  try{
+    const d=await (await fetch('/api/cuda-status')).json();
+    const tv=d.torch_version||'n/d',cv=d.cuda_runtime_version||'n/d';
+    if(!d.ok){
+      cudaDot.className='dot red';
+      cudaText.innerHTML='<b>CUDA:</b> errore';
+      cudaSub.textContent=`${d.note||''} | torch=${tv} cuda_rt=${cv}`;
+      return;
+    }
+    if(d.cuda_available){
+      cudaDot.className='dot green';
+      cudaText.innerHTML='<b>CUDA:</b> OK';
+      cudaSub.textContent=`${d.device_name||('GPU x'+(d.device_count||0))} | torch=${tv} cuda_rt=${cv}`;
+    } else {
+      cudaDot.className='dot red';
+      cudaText.innerHTML='<b>CUDA:</b> CPU';
+      cudaSub.textContent=`${d.note||'torch vede solo CPU'} | torch=${tv} cuda_rt=${cv}`;
+    }
+  }catch(e){
+    cudaDot.className='dot red';
+    cudaText.innerHTML='<b>CUDA:</b> errore';
+    cudaSub.textContent=String(e);
+  }
+}
+
+async function pickImportFile(){
+  document.getElementById("fileInput").click();
+}
+
+document.getElementById("fileInput").addEventListener("change", (e)=>{
+  const f = e.target.files && e.target.files[0];
+  if(f) document.getElementById("importPath").value = f.name;
+});
+
+async function importToInput(){
+  const path=document.getElementById("importPath").value||'';
+  const fi=document.getElementById("fileInput");
+
+  if(fi && fi.files && fi.files.length>0){
+    const f=fi.files[0];
+    const fd=new FormData();
+    fd.append("file", f);
+
+    const resp = await fetch("/api/upload-to-input", { method:"POST", body: fd });
+    const d = await resp.json();
+
+    if(!d.ok){ alert("Errore upload: " + (d.error||"")); return; }
+    importInfo.textContent="Importato in: " + d.imported_to;
+
+    fi.value="";
+    document.getElementById("importPath").value="";
+    return;
+  }
+
+  if(!path.trim()){ alert('Seleziona file o inserisci un percorso'); return; }
+  const d=await (await fetch('/api/import-to-input',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({path})})).json();
+  if(!d.ok){ alert('Errore import: '+(d.error||'')); return; }
+  importInfo.textContent='Importato in: '+d.imported_to;
+}
+
+async function runSmistamento(){
+  lastEventCount=0;
+  eventsEl.textContent='';
+  const d=await (await fetch('/api/run-smistamento-job',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json();
+  if(!d.ok){ statusEl.textContent='Errore: '+(d.error||''); return; }
+  currentJobId=d.job_id;
+  if(pollTimer) clearInterval(pollTimer);
+  pollTimer=setInterval(pollJob,700);
+  await pollJob();
+}
+
+document.getElementById("pickImportBtn").onclick=pickImportFile;
+document.getElementById("importBtn").onclick=importToInput;
+document.getElementById("runSmistamentoBtn").onclick=runSmistamento;
+
+refreshCuda();
+setInterval(refreshCuda,5000);
+</script>
+{% endblock %}

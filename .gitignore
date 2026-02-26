@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+webapp/users.db
+chroma_db/
+Backup/
+# asset binari locali (evita errore "file binari non supportati")
+webapp/static/*.png

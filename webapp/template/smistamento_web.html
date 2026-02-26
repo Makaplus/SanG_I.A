@@ -1,0 +1,364 @@
+{% extends "base.html" %}
+{% block title %}SANG_I.A. - Libreria{% endblock %}
+
+{% block content %}
+<div class="card" style="text-align:center;">
+  <h2>Smistamento in Libreria</h2>
+  <div class="muted">Backup/Ripristino DB + correzione manuale DB.</div>
+</div>
+
+<div class="card">
+  <div class="row" style="align-items:center;">
+    <button id="reloadBtn" class="secondary">⟳ Ricarica documenti DB</button>
+    <button id="backupBtn">🧾 Backup DB</button>
+    <button id="restoreBtn" class="secondary">♻ Ripristina DB da backup</button>
+    <button id="resetErroriBtn" class="danger">⚠ Reset errori</button>
+    <div class="cudaBadge" style="margin-left:auto;">
+      <div id="cudaDot" class="dot"></div>
+      <div>
+        <div id="cudaText"><b>CUDA:</b> controllo...</div>
+        <div id="cudaSub" class="muted"></div>
+      </div>
+    </div>
+  </div>
+  <div class="muted" id="backupInfo" style="margin-top:8px;"></div>
+</div>
+
+<div class="card dangerCard">
+  <h3 style="text-align:center;">Correzione manuale DB</h3>
+
+  <div class="row" style="margin-top:10px; align-items:center;">
+    <input id="dbSearch" placeholder="Percorso o nome file (ricerca nel DB)..." style="min-width:420px;">
+    <button id="dbSearchBtn" class="secondary">Cerca nel DB</button>
+    <span class="muted" id="dbSearchInfo"></span>
+  </div>
+
+  <table style="margin-top:10px;">
+    <thead>
+      <tr><th>ID</th><th>Nome file</th><th>Anno</th><th>RGNR</th><th>Procura</th><th>Tipo</th><th>Note</th></tr>
+    </thead>
+    <tbody id="searchRows"></tbody>
+  </table>
+
+  <div class="grid2" style="margin-top:10px;">
+    <input id="selectedId" placeholder="ID selezionato" readonly style="max-width:90px;">
+    <input id="selectedFile" placeholder="Nome file selezionato" readonly>
+  </div>
+
+  <div class="grid5" style="margin-top:10px;">
+    <input id="file" placeholder="nome file" readonly>
+    <input id="anno" placeholder="anno">
+    <input id="tipo_documento" placeholder="tipo_documento">
+    <input id="rgnr" placeholder="es 4818/06">
+    <input id="procura" placeholder="procura">
+  </div>
+
+  <div class="row" style="margin-top:10px; flex-wrap:wrap;">
+    <button id="saveAnnoBtn" class="secondary">Salva Anno</button>
+    <button id="saveTipoBtn" class="secondary">Salva Tipo</button>
+    <button id="saveRgnrBtn" class="secondary">Salva RGNR</button>
+    <button id="saveProcuraBtn" class="secondary">Salva Procura</button>
+    <button id="deleteRowBtn" class="danger">🗑 Elimina riga e rimetti file in input</button>
+  </div>
+  <div class="muted" style="margin-top:8px;">Regola: se un campo è vuoto, NON sovrascrive.</div>
+</div>
+
+<div class="card">
+  <h3>Output</h3>
+  <pre id="log"></pre>
+</div>
+
+<div class="card">
+  <h3>Ultimi documenti da DB</h3>
+  <table>
+    <thead id="rowsHead"></thead>
+    <tbody id="rows"></tbody>
+  </table>
+  <div class="muted" style="margin-top:8px;">Clicca una riga per caricarla nei campi sopra. Clicca intestazione per ordinare.</div>
+</div>
+
+<div class="card">
+  <h3>Correzioni CSV</h3>
+  <div class="row">
+    <button id="reloadOverridesBtn" class="secondary">⟳ Ricarica correzioni</button>
+    <button id="applyOverrideBtn">🛠️ Applica override selezionato al DB</button>
+    <span class="muted" style="margin-left:auto;" id="overridesPath"></span>
+  </div>
+
+  <table>
+    <thead>
+      <tr><th>#</th><th>File</th><th>Anno</th><th>RGNR</th><th>Procura</th><th>Tipo</th><th>Dest.</th><th>Note</th></tr>
+    </thead>
+    <tbody id="overrideRows"></tbody>
+  </table>
+</div>
+
+<script>
+const logEl = document.getElementById('log');
+const backupInfo = document.getElementById('backupInfo');
+const cudaDot = document.getElementById('cudaDot');
+const cudaText = document.getElementById('cudaText');
+const cudaSub = document.getElementById('cudaSub');
+const overrideRowsTbody = document.getElementById('overrideRows');
+const overridesPathEl = document.getElementById('overridesPath');
+
+const rowsBody = document.getElementById('rows');
+const rowsHead = document.getElementById('rowsHead');
+
+let selectedOverrideFile = '';
+let selectedOverrideTargetId = null;
+let _tableCols = [];
+let _tableRows = [];
+let _sort = {key:null, dir:'asc'};
+
+function setLog(txt){ logEl.textContent = txt || ''; }
+function esc(s){return (s??'').toString().replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&#039;');}
+
+function colIdx(name){ return _tableCols.indexOf(name); }
+function rowVal(row, name){ const i = colIdx(name); return i>=0 ? (row[i] ?? '') : ''; }
+
+function fillFormFromRow(row){
+  const rid = row[0];
+  const nome = rowVal(row, 'nome_file') || rowVal(row, 'file') || rowVal(row, 'file_path');
+  selectedId.value = rid;
+  selectedFile.value = nome || '';
+  file.value = nome || '';
+  anno.value = rowVal(row, 'anno') || '';
+  tipo_documento.value = rowVal(row, 'tipo_documento') || '';
+  rgnr.value = (rowVal(row, 'rgnr') || '').toUpperCase();
+  procura.value = rowVal(row, 'procura') || '';
+}
+
+function sortRowsBy(key){
+  if(_sort.key === key){ _sort.dir = _sort.dir === 'asc' ? 'desc' : 'asc'; }
+  else { _sort = {key, dir:'asc'}; }
+
+  const i = colIdx(key);
+  if(i < 0) return;
+  const isNumericCol = key === '_rowid' || key === 'id';
+  _tableRows.sort((a,b)=>{
+    if(isNumericCol){
+      const an = Number(a[i] ?? 0);
+      const bn = Number(b[i] ?? 0);
+      if(an < bn) return _sort.dir === 'asc' ? -1 : 1;
+      if(an > bn) return _sort.dir === 'asc' ? 1 : -1;
+      return 0;
+    }
+    const av = (a[i] ?? '').toString().toLowerCase();
+    const bv = (b[i] ?? '').toString().toLowerCase();
+    if(av < bv) return _sort.dir === 'asc' ? -1 : 1;
+    if(av > bv) return _sort.dir === 'asc' ? 1 : -1;
+    return 0;
+  });
+  renderRows();
+}
+
+function renderRows(){
+  const colsToShow = ['_rowid','nome_file','anno','rgnr','procura','tipo_documento','note'];
+  const colLabel = (c)=> c === '_rowid' ? 'ID' : c;
+  rowsHead.innerHTML = `<tr>${colsToShow.map(c=>`<th data-col='${c}' style='cursor:pointer'>${colLabel(c)}${_sort.key===c?(_sort.dir==='asc'?' ▲':' ▼'):''}</th>`).join('')}</tr>`;
+  rowsHead.querySelectorAll('th').forEach(th=>th.onclick=()=>sortRowsBy(th.dataset.col));
+
+  rowsBody.innerHTML = '';
+  _tableRows.forEach(r=>{
+    const tr = document.createElement('tr');
+    tr.style.cursor='pointer';
+    tr.innerHTML = `<td>${esc(r[0])}</td><td>${esc(rowVal(r,'nome_file') || rowVal(r,'file') || rowVal(r,'file_path'))}</td><td>${esc(rowVal(r,'anno'))}</td><td>${esc(rowVal(r,'rgnr'))}</td><td>${esc(rowVal(r,'procura'))}</td><td>${esc(rowVal(r,'tipo_documento'))}</td><td>${esc(rowVal(r,'note'))}</td>`;
+    tr.onclick = ()=>fillFormFromRow(r);
+    rowsBody.appendChild(tr);
+  });
+}
+
+async function refreshCuda(){
+  try{
+    const data = await (await fetch('/api/cuda-status')).json();
+    const torchv = data.torch_version || 'n/d';
+    const cudav = data.cuda_runtime_version || 'n/d';
+    if (!data.ok){ cudaDot.className='dot red'; cudaText.innerHTML='<b>CUDA:</b> errore'; cudaSub.textContent = `${data.note || ''} | torch=${torchv} cuda_rt=${cudav}`; return; }
+    if (data.cuda_available){ cudaDot.className='dot green'; cudaText.innerHTML='<b>CUDA:</b> OK'; cudaSub.textContent = `${data.device_name || ('GPU x'+(data.device_count||0))} | torch=${torchv} cuda_rt=${cudav}`; }
+    else { cudaDot.className='dot red'; cudaText.innerHTML='<b>CUDA:</b> CPU'; cudaSub.textContent = `${data.note || 'torch vede solo CPU'} | torch=${torchv} cuda_rt=${cudav}`; }
+  }catch(e){ cudaDot.className='dot red'; cudaText.innerHTML='<b>CUDA:</b> errore'; cudaSub.textContent=String(e); }
+}
+
+async function loadRows(){
+  const data = await (await fetch('/api/documenti?limit=200')).json();
+  if(!data.ok){ setLog("Errore /api/documenti: " + (data.error||"")); return; }
+  _tableCols = data.columns || [];
+  _tableRows = (data.rows || []).slice();
+  _sort = {key:'_rowid', dir:'desc'};
+  sortRowsBy('_rowid');
+}
+
+async function searchInDb(){
+  const q = (dbSearch.value || '').trim();
+  if(!q){ dbSearchInfo.textContent = 'Inserisci un testo da cercare'; return; }
+  const data = await (await fetch(`/api/documenti/search?q=${encodeURIComponent(q)}`)).json();
+  if(!data.ok){ setLog('Errore ricerca DB: ' + (data.error||'')); return; }
+  dbSearchInfo.textContent = `Trovati ${ (data.rows||[]).length } risultati`;
+
+  const body = document.getElementById('searchRows');
+  body.innerHTML='';
+  const cols = data.columns || [];
+  const idx = (name)=>cols.indexOf(name);
+  for(const r of (data.rows||[])){
+    const tr = document.createElement('tr');
+    tr.style.cursor='pointer';
+    const get = (n)=>{ const i=idx(n); return i>=0 ? r[i] : ''; };
+    const nome = get('nome_file') || get('file') || get('file_path') || '';
+    tr.innerHTML = `<td>${esc(r[0])}</td><td>${esc(nome)}</td><td>${esc(get('anno'))}</td><td>${esc(get('rgnr'))}</td><td>${esc(get('procura'))}</td><td>${esc(get('tipo_documento'))}</td><td>${esc(get('note'))}</td>`;
+    tr.onclick = ()=>{
+      selectedId.value = r[0];
+      selectedFile.value = nome;
+      file.value = nome;
+      anno.value = get('anno') || '';
+      tipo_documento.value = get('tipo_documento') || '';
+      rgnr.value = (get('rgnr') || '').toUpperCase();
+      procura.value = get('procura') || '';
+      selectedOverrideTargetId = r[0];
+    };
+    body.appendChild(tr);
+  }
+}
+
+async function backupDb(){
+  const data = await (await fetch('/api/backup-db',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json();
+  if(!data.ok){ setLog('Errore backup: '+(data.error||'')); return; }
+  backupInfo.textContent = `Backup: ${data.backup_path}`;
+}
+
+async function restoreDb(){
+  if(!confirm('Ripristinare DB da ultimo backup?')) return;
+  const data = await (await fetch('/api/restore-db',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json();
+  if(!data.ok){ setLog('Errore ripristino: '+(data.error||'')); return; }
+  setLog(`Ripristino completato\nDa: ${data.restored_from}\nBackup automatico: ${data.auto_backup}`);
+  await loadRows();
+}
+
+async function loadOverrides(){
+  const data = await (await fetch('/api/overrides')).json();
+  if(!data.ok){ setLog('Errore override: '+(data.error||'')); return; }
+  overridesPathEl.textContent = data.path || '';
+  overrideRowsTbody.innerHTML='';
+  (data.rows||[]).forEach(r=>{
+    const tr=document.createElement('tr');
+    tr.style.cursor='pointer';
+    tr.innerHTML = `<td>${r._idx??''}</td><td>${esc(r._basename??(r.file??''))}</td><td>${esc(r.anno??'')}</td><td>${esc(r.rgnr??'')}</td><td>${esc(r.procura??'')}</td><td>${esc(r.tipo_documento??'')}</td><td>${esc(r.destinazione??'')}</td><td>${esc(r.note??'')}</td>`;
+    tr.onclick=()=>{
+      selectedOverrideFile=r.file??'';
+      file.value=r.file??'';
+      anno.value=r.anno??'';
+      tipo_documento.value=r.tipo_documento??'';
+      rgnr.value=(r.rgnr??'').toUpperCase();
+      procura.value=r.procura??'';
+    };
+    overrideRowsTbody.appendChild(tr);
+  });
+}
+
+async function runResetErrori(){
+  const includeVerbali = confirm("Vuoi includere anche Vari_Verbali nel reset?\nOK = sì, Annulla = no");
+  const data = await (await fetch('/api/run-reset-errori', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({include_verbali: includeVerbali})
+  })).json();
+  if(!data.ok){
+    setLog('Errore reset errori: ' + (data.error||'') + (data.details ? ('\n'+data.details) : ''));
+    return;
+  }
+  setLog(data.output || 'Reset errori completato');
+}
+
+async function deleteSelectedRowAndRequeue(){
+  const id = (selectedId.value || '').trim();
+  if(!id){ alert('Seleziona una riga DB'); return; }
+  if(!confirm(`Confermi eliminazione ID ${id}?\nIl file verrà rimesso in input_documenti se trovato.`)) return;
+
+  const data = await (await fetch('/api/delete-db-row-and-requeue', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id})
+  })).json();
+
+  if(!data.ok){
+    alert('Errore eliminazione: ' + (data.error||'') + (data.details ? ('\n'+data.details) : ''));
+    return;
+  }
+
+  const msg = [
+    `Riga eliminata: ${data.deleted_id}`,
+    `File: ${data.nome_file || 'n/d'}`,
+    `Reinserito in input: ${data.requeued_to || 'file non trovato in libreria'}`,
+    `Backup DB: ${data.backup_path || 'n/d'}`
+  ].join('\n');
+  setLog(msg);
+  selectedId.value = '';
+  selectedFile.value = '';
+  file.value = '';
+  await loadRows();
+}
+
+async function applyOverrideToDb(){
+  const f = (selectedOverrideFile || file.value || '').trim();
+  if(!f){ alert('Seleziona una riga in Correzioni CSV'); return; }
+  const payload = { file: f };
+  if(selectedOverrideTargetId) payload.target_id = selectedOverrideTargetId;
+
+  let data = await (await fetch('/api/apply-override-to-db', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)})).json();
+  if(!data.ok && data.candidates && data.candidates.length){
+    const ids = data.candidates.map(c=>`${c.id} - ${(c.nome_file||'')}`).join('\n');
+    const pick = prompt((data.error||'Conflitto')+'\n'+ids+'\nInserisci ID:');
+    if(!pick) return;
+    data = await (await fetch('/api/apply-override-to-db', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({file:f, target_id: pick.trim()})})).json();
+  }
+  if(!data.ok){ alert('Errore: '+(data.error||'')); return; }
+  setLog(`Override applicato\nBackup: ${data.backup_path}\nID: ${data.target_id}`);
+  await loadRows();
+}
+
+async function saveDbField(fieldName){
+  const id = selectedId.value;
+  if(!id){ alert('Seleziona riga DB'); return; }
+
+  if(fieldName === 'anno'){
+    const nome = (selectedFile.value || file.value || '').trim();
+    const y = (anno.value || '').trim();
+    const data = await (await fetch('/api/update-anno-and-move', {
+      method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({id, nome_file:nome, anno:y})
+    })).json();
+    if(!data.ok){ alert('Errore update anno: ' + (data.error||'') + (data.details ? ('\n'+data.details) : '')); return; }
+    setLog(data.output || data.message || 'Anno aggiornato');
+    await loadRows();
+    return;
+  }
+
+  const payload = {id};
+  payload[fieldName] = document.getElementById(fieldName).value;
+
+  const data = await (await fetch('/api/update-db', {
+    method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)
+  })).json();
+
+  if(!data.ok){ alert('Errore update: '+(data.error||'')); return; }
+  backupInfo.textContent = `Backup automatico: ${data.backup_path||''}`;
+  await loadRows();
+}
+
+reloadBtn.onclick = loadRows;
+backupBtn.onclick = backupDb;
+restoreBtn.onclick = restoreDb;
+resetErroriBtn.onclick = runResetErrori;
+dbSearchBtn.onclick = searchInDb;
+dbSearch.addEventListener('keydown', (e)=>{
+  if(e.key === 'Enter'){
+    e.preventDefault();
+    searchInDb();
+  }
+});
+reloadOverridesBtn.onclick = loadOverrides;
+applyOverrideBtn.onclick = applyOverrideToDb;
+saveAnnoBtn.onclick = ()=>saveDbField('anno');
+saveTipoBtn.onclick = ()=>saveDbField('tipo_documento');
+saveRgnrBtn.onclick = ()=>saveDbField('rgnr');
+saveProcuraBtn.onclick = ()=>saveDbField('procura');
+deleteRowBtn.onclick = deleteSelectedRowAndRequeue;
+
+loadRows(); loadOverrides(); refreshCuda(); setInterval(refreshCuda,5000);
+</script>
+{% endblock %}
