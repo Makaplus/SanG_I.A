@@ -21,8 +21,10 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 from typing import Optional, Tuple
+from xml.etree import ElementTree as ET
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 DB_PATH = PROJECT_ROOT / "libreria" / "documenti.db"
@@ -155,7 +157,82 @@ def _decode_best(b: bytes) -> str:
     return b.decode("latin-1", errors="ignore")
 
 
+def _read_txt_file(path: Path) -> Tuple[Optional[str], str, str]:
+    try:
+        data = path.read_bytes()
+        return _decode_best(data), "txt", ""
+    except Exception as e:
+        return None, "txt", f"txt_read_error:{e}"
+
+
+def _rtf_to_text_simple(rtf: str) -> str:
+    # fallback leggero: rimuove controlli RTF più comuni
+    t = rtf.replace("\r", " ").replace("\n", " ")
+    t = re.sub(r"\\'[0-9a-fA-F]{2}", " ", t)
+    t = re.sub(r"\\[a-zA-Z]+-?\d* ?", " ", t)
+    t = t.replace("{", " ").replace("}", " ")
+    t = re.sub(r"\s+", " ", t).strip()
+    return t
+
+
+def _read_rtf_file(path: Path) -> Tuple[Optional[str], str, str]:
+    try:
+        raw = _decode_best(path.read_bytes())
+        text = _rtf_to_text_simple(raw)
+        if text:
+            return text, "rtf-parser", ""
+        return None, "rtf-parser", "rtf_empty_after_parse"
+    except Exception as e:
+        return None, "rtf-parser", f"rtf_read_error:{e}"
+
+
+def _read_docx_file(path: Path) -> Tuple[Optional[str], str, str]:
+    try:
+        with zipfile.ZipFile(path, "r") as zf:
+            xml = zf.read("word/document.xml")
+        root = ET.fromstring(xml)
+        ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+        parts = []
+        for t in root.findall('.//w:t', ns):
+            if t.text:
+                parts.append(t.text)
+        text = " ".join(parts).strip()
+        text = re.sub(r"\s+", " ", text)
+        if text:
+            return text, "docx-xml", ""
+        return None, "docx-xml", "docx_empty_after_parse"
+    except Exception as e:
+        return None, "docx-xml", f"docx_read_error:{e}"
+
+
 def convert_doc_to_text(doc_path: Path) -> Tuple[Optional[str], str, str]:
+    ext = doc_path.suffix.lower()
+
+    # percorsi veloci per formati non-DOC binario
+    if ext == ".txt":
+        return _read_txt_file(doc_path)
+
+    if ext == ".rtf":
+        t, m, d = _read_rtf_file(doc_path)
+        if t:
+            return t, m, d
+
+    if ext == ".docx":
+        t, m, d = _read_docx_file(doc_path)
+        if t:
+            return t, m, d
+
+    # .doc ma in realtà RTF rinominato: intercettalo prima di antiword
+    if ext == ".doc":
+        try:
+            head = doc_path.read_bytes()[:64].lower()
+            if b"{\\rtf" in head:
+                t, m, d = _read_rtf_file(doc_path)
+                if t:
+                    return t, "rtf-in-doc", d
+        except Exception:
+            pass
+
     env = os.environ.copy()
     env["HOME"] = env.get("USERPROFILE", str(PROJECT_ROOT))
     env["ANTIWORDHOME"] = str(ANTIWORD_DIR)
@@ -275,7 +352,7 @@ def main():
         cur.execute("UPDATE documenti SET status='NEEDS_READER' WHERE id=?", (doc_id,))
         con.commit()
         con.close()
-        print("[MISS] Lettura DOC fallita. Debug:", debug_err)
+        print("[MISS] Lettura documento fallita. Debug:", debug_err)
         sys.exit(3)
 
     preview = text[:8000]
