@@ -30,17 +30,23 @@ body{
   padding: 0 14px;
 }
 
-/* --- BANNER: non tagliato, più alto, scende giù --- */
+/* --- BANNER responsive: sempre visibile a ogni risoluzione --- */
 .banner{
   width:100%;
   background:#000;
   border-bottom:1px solid var(--border);
   box-shadow: 0 10px 30px rgba(0,0,0,0.45);
   overflow:hidden;
+  display:flex;
+  justify-content:center;
+  align-items:center;
+  padding: 6px 10px;
 }
 .banner img{
-  width:100%;
-  height:auto;              /* IMPORTANT: niente crop */
+  width:min(100%, 1680px);
+  max-height: clamp(84px, 16vw, 220px);
+  height:auto;
+  object-fit:contain;
   display:block;
   filter: contrast(1.06) saturate(1.05);
 }
@@ -223,4 +229,32 @@ pre{
   display:grid;
   grid-template-columns: 2fr 1fr 1.2fr 1.2fr 1.2fr;
   gap:10px;
+}
+
+
+.responsive-row{ flex-wrap: wrap; }
+
+@media (max-width: 900px){
+  .navbar{
+    flex-wrap: wrap;
+    gap: 8px;
+    padding: 10px 8px;
+  }
+  .navbtn{
+    font-size: 13px;
+    padding: 8px 12px;
+  }
+  .container{
+    margin-top: 12px;
+  }
+  .banner img{
+    max-height: clamp(72px, 20vw, 160px);
+  }
+  .row{
+    flex-wrap: wrap;
+  }
+  input, select{
+    width: 100%;
+    min-width: 0 !important;
+  }
 }

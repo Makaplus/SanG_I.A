@@ -653,6 +653,58 @@ def api_job():
         return json_ok(job=job)
 
 
+@app.route("/api/run-revisione-job", methods=["POST"])
+@admin_required
+def api_run_revisione_job():
+    py = os.path.join(PROJECT_ROOT, "venv", "Scripts", "python.exe")
+    if not os.path.exists(py):
+        py = os.environ.get("PYTHON", "python3")
+
+    revisione_script = os.path.join(PROJECT_ROOT, "revisione.py")
+    if not os.path.exists(revisione_script):
+        return json_err("revisione.py non trovato", 500)
+
+    data = request.get_json(silent=True) or {}
+    mode = str(data.get("mode") or "occ").strip().lower()
+
+    cmd = [py, revisione_script]
+    job_name = "revisione_occ"
+
+    if mode == "db":
+        cmd += ["--only-status", "REVISIONE_OCC"]
+        job_name = "revisione_db"
+    elif mode == "revisione":
+        cmd += ["--folder", os.path.join(PROJECT_ROOT, "libreria", "revisione")]
+        job_name = "revisione_folder"
+    elif mode == "occ":
+        cmd += ["--folder", os.path.join(PROJECT_ROOT, "libreria", "revisione", "occ")]
+        job_name = "revisione_occ"
+    else:
+        return json_err("mode non valido (usa: db, revisione, occ)", 400)
+
+    job_id = str(uuid.uuid4())
+    job = {
+        "job_id": job_id,
+        "name": job_name,
+        "status": "queued",
+        "started_at": None,
+        "ended_at": None,
+        "returncode": None,
+        "events": []
+    }
+    with _jobs_lock:
+        _jobs[job_id] = job
+
+    t = threading.Thread(
+        target=_run_subprocess_job,
+        args=(job_id, cmd, PROJECT_ROOT),
+        daemon=True
+    )
+    t.start()
+
+    return json_ok(job_id=job_id, mode=mode)
+
+
 def _tk_pick_file():
     try:
         import tkinter as tk

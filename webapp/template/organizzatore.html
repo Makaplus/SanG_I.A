@@ -22,7 +22,7 @@
 
 <div class="card">
   <h3>Inserire file</h3>
-  <div class="row" style="margin-top:10px;">
+  <div class="row responsive-row" style="margin-top:10px;">
     <input id="importPath" placeholder="Percorso file da importare..." style="min-width:420px;">
     <input id="fileInput" type="file" style="display:none" />
     <button class="secondary" id="pickImportBtn">Sfoglia...</button>
@@ -34,6 +34,18 @@
 <div class="card">
   <h3>Avvia lo smistamento</h3>
   <button id="runSmistamentoBtn">Avvia lo smistamento</button>
+</div>
+
+<div class="card">
+  <h3>Revisione OCC (nuove logiche)</h3>
+  <div class="muted" style="margin-bottom:10px;">
+    Lancia il revisore in tre modalità: su DB (status <code>REVISIONE_OCC</code>), su cartella revisione, o su cartella revisione/occ.
+  </div>
+  <div class="row responsive-row">
+    <button id="runRevisioneDbBtn" class="secondary">Revisore su DB</button>
+    <button id="runRevisioneFolderBtn" class="secondary">Revisore su cartella revisione</button>
+    <button id="runRevisioneOccBtn" class="secondary">Revisore su cartella OCC</button>
+  </div>
 </div>
 
 <div class="card">
@@ -137,10 +149,10 @@ async function importToInput(){
   importInfo.textContent='Importato in: '+d.imported_to;
 }
 
-async function runSmistamento(){
+async function startJobFromEndpoint(endpoint, payload={}){
   lastEventCount=0;
   eventsEl.textContent='';
-  const d=await (await fetch('/api/run-smistamento-job',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json();
+  const d=await (await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})).json();
   if(!d.ok){ statusEl.textContent='Errore: '+(d.error||''); return; }
   currentJobId=d.job_id;
   if(pollTimer) clearInterval(pollTimer);
@@ -148,9 +160,20 @@ async function runSmistamento(){
   await pollJob();
 }
 
+async function runSmistamento(){
+  return startJobFromEndpoint('/api/run-smistamento-job',{});
+}
+
+async function runRevisione(mode){
+  return startJobFromEndpoint('/api/run-revisione-job',{mode});
+}
+
 document.getElementById("pickImportBtn").onclick=pickImportFile;
 document.getElementById("importBtn").onclick=importToInput;
 document.getElementById("runSmistamentoBtn").onclick=runSmistamento;
+document.getElementById("runRevisioneDbBtn").onclick=()=>runRevisione('db');
+document.getElementById("runRevisioneFolderBtn").onclick=()=>runRevisione('revisione');
+document.getElementById("runRevisioneOccBtn").onclick=()=>runRevisione('occ');
 
 refreshCuda();
 setInterval(refreshCuda,5000);
