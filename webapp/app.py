@@ -653,6 +653,61 @@ def api_job():
         return json_ok(job=job)
 
 
+codex/iniziare-progetto-libreria-atti-di-polizia-sri8es
+@app.route("/api/run-revisione-job", methods=["POST"])
+@admin_required
+def api_run_revisione_job():
+    py = os.path.join(PROJECT_ROOT, "venv", "Scripts", "python.exe")
+    if not os.path.exists(py):
+        py = os.environ.get("PYTHON", "python3")
+
+    revisione_script = os.path.join(PROJECT_ROOT, "revisione.py")
+    if not os.path.exists(revisione_script):
+        return json_err("revisione.py non trovato", 500)
+
+    data = request.get_json(silent=True) or {}
+    mode = str(data.get("mode") or "occ").strip().lower()
+
+    cmd = [py, revisione_script]
+    job_name = "revisione_occ"
+
+    if mode == "db":
+        cmd += ["--only-status", "REVISIONE_OCC"]
+        job_name = "revisione_db"
+    elif mode == "revisione":
+        cmd += ["--folder", os.path.join(PROJECT_ROOT, "libreria", "revisione")]
+        job_name = "revisione_folder"
+    elif mode == "occ":
+        cmd += ["--folder", os.path.join(PROJECT_ROOT, "libreria", "revisione", "occ")]
+        job_name = "revisione_occ"
+    else:
+        return json_err("mode non valido (usa: db, revisione, occ)", 400)
+
+    job_id = str(uuid.uuid4())
+    job = {
+        "job_id": job_id,
+        "name": job_name,
+        "status": "queued",
+        "started_at": None,
+        "ended_at": None,
+        "returncode": None,
+        "events": []
+    }
+    with _jobs_lock:
+        _jobs[job_id] = job
+
+    t = threading.Thread(
+        target=_run_subprocess_job,
+        args=(job_id, cmd, PROJECT_ROOT),
+        daemon=True
+    )
+    t.start()
+
+    return json_ok(job_id=job_id, mode=mode)
+
+
+=======
+main
 def _tk_pick_file():
     try:
         import tkinter as tk
@@ -974,8 +1029,36 @@ def api_update_db():
         con.close()
         return json_err("Nessun campo da aggiornare", 400)
 
+codex/iniziare-progetto-libreria-atti-di-polizia-sri8es
+    old_nome = None
+    nome_col = "nome_file" if "nome_file" in allowed else None
+    if nome_col:
+        cur.execute(f"SELECT {nome_col} FROM {table} WHERE rowid=?", (rid,))
+        row = cur.fetchone()
+        old_nome = row[0] if row else None
+
     bkp = backup_file(DOCUMENTI_DB)
 
+    renamed_to = None
+    if nome_col and "nome_file" in updates and old_nome and updates["nome_file"] != old_nome:
+        libreria_root = os.path.join(PROJECT_ROOT, "libreria")
+        src_path = None
+        for root, _dirs, files in os.walk(libreria_root):
+            if old_nome in files:
+                src_path = os.path.join(root, old_nome)
+                break
+        if src_path:
+            dst_path = os.path.join(os.path.dirname(src_path), updates["nome_file"])
+            if os.path.exists(dst_path):
+                con.close()
+                return json_err("Esiste già un file con questo nome nella stessa cartella", 400)
+            os.replace(src_path, dst_path)
+            renamed_to = dst_path
+
+=======
+    bkp = backup_file(DOCUMENTI_DB)
+
+main
     set_sql = ", ".join([f"{k}=?" for k in updates.keys()])
     params = list(updates.values())
     params.append(rid)
@@ -983,7 +1066,11 @@ def api_update_db():
     con.commit()
     con.close()
 
+codex/iniziare-progetto-libreria-atti-di-polizia-sri8es
+    return json_ok(backup_path=bkp, updated_fields=list(updates.keys()), renamed_to=renamed_to)
+=======
     return json_ok(backup_path=bkp, updated_fields=list(updates.keys()))
+main
 
 
 @app.route("/api/documenti/search", methods=["GET"])

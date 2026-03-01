@@ -2,727 +2,18 @@
 # -*- coding: utf-8 -*-
 
 """
-codex/iniziare-progetto-libreria-atti-di-polizia-sri8es
-SANGIA - ORGANIZZATORE (v21.2)
-
-Fix/novità principali:
-1) Pre-process per estensione:
-   - .doc/.docx/.rtf/.txt: chiama SEMPRE organizzatore_doc_reader.py (anche se non è OCC)
-   - .pdf: preview pypdf per classificazione (OCR forte resta ai worker/Router revisione)
-
-2) Classificazione rigida via “tabella regole” nel DB:
-   - classi (attuali): OCC -> INFORMATIVA -> RELAZIONE -> ALTRO
-   - seed DB include anche placeholder: SENTENZA, ARTICOLI, ANNOTAZIONI, RICORSI (per step successivi)
-
-3) Smistamento NON-OCC:
-   - se anno noto nel DB -> usa organizzatore_percorso.py (sposta in libreria\YYYY\) senza rename
-   - se anno mancante -> usa organizzatore_vari_verbali.py
-
-4) Output: stampa SEMPRE "tipo=..." su ogni riga.
-"""
-
-import re
-import time
-import json
-import hashlib
-import sqlite3
-import subprocess
-import sys
-from pathlib import Path
-from typing import Dict, Any, List, Optional, Tuple
-
-# =============================================================================
-# UTILS
-# =============================================================================
-
-def keep_last_n_files(folder: Path, n: int = 5):
-    folder.mkdir(parents=True, exist_ok=True)
-    files = [p for p in folder.iterdir() if p.is_file()]
-    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    for p in files[n:]:
-        try:
-            p.unlink()
-        except Exception:
-            pass
-
-def sha1_file(path: Path) -> str:
-    h = hashlib.sha1()
-    with open(path, "rb") as f:
-        while True:
-            chunk = f.read(1024 * 1024)
-            if not chunk:
-                break
-            h.update(chunk)
-    return h.hexdigest()
-
-def format_mtime(ts: float) -> str:
-    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(ts))
-
-def mark(ok: bool) -> str:
-    return "✅" if ok else "⚠️"
-
-def fmt_tipo(tipo_doc: Optional[str]) -> str:
-    t = (tipo_doc or "").strip().upper() or "ALTRO"
-    return f"tipo={t}"
-
-def filename_has_occ_token(name: str) -> bool:
-    # token OCC/OCCC come parola (evita match su 'OCCASIONE' ecc.)
-    stem = Path(name).stem
-    return bool(re.search(r"(?i)(?:^|[ \._\-])OCC{1,3}(?:$|[ \._\-])", stem))
-
-
-# =============================================================================
-# PATHS
-# =============================================================================
-
-PROJECT_ROOT = Path(__file__).resolve().parent
-INPUT_DIR = PROJECT_ROOT / "input_documenti"
-DUP_DIR = INPUT_DIR / "duplicati"
-DB_PATH = PROJECT_ROOT / "libreria" / "documenti.db"
-
-LIB_DIR = PROJECT_ROOT / "libreria"
-REV_OCC_DIR = LIB_DIR / "revisione" / "occ"
-LOG_DIR = PROJECT_ROOT / "Backup" / "log_smistamenti"
-
-ALLOWED_EXTS = {".pdf", ".docx", ".doc", ".txt", ".rtf"}
-MAX_PREVIEW_PAGES_PDF = 2
-MAX_PREVIEW_CHARS = 8000
-FINAL_STATUSES = {"STORED", "COMPLETED", "DONE"}
-
-# gating OCC completo
-RE_RGNR_PARSE = re.compile(r"(\d{1,7})\s*/\s*(\d{4})")
-
-# =============================================================================
-# PDF READER
-# =============================================================================
-
-def load_pdf_reader():
-    try:
-        from pypdf import PdfReader  # type: ignore
-        return PdfReader, "pypdf"
-    except Exception:
-        return None, None
-
-PdfReader, PDF_LIB = load_pdf_reader()
-
-def pdf_preview(path: Path) -> Tuple[Dict[str, Any], Optional[int], str]:
-    if not PdfReader:
-        return {"_pdf_lib": "NONE"}, None, ""
-    meta: Dict[str, Any] = {"_pdf_lib": PDF_LIB}
-    pages = None
-    parts: List[str] = []
-    try:
-        reader = PdfReader(str(path))
-        try:
-            pages = len(reader.pages)
-        except Exception:
-            pages = None
-
-        n = min(MAX_PREVIEW_PAGES_PDF, pages or MAX_PREVIEW_PAGES_PDF)
-        for i in range(n):
-            try:
-                t = reader.pages[i].extract_text() or ""
-                t = t.strip()
-                if t:
-                    parts.append(t)
-            except Exception:
-                continue
-    except Exception as e:
-        meta["_error"] = str(e)
-
-    preview = "\n\n".join(parts)
-    if len(preview) > MAX_PREVIEW_CHARS:
-        preview = preview[:MAX_PREVIEW_CHARS] + "\n...[TRUNCATED]..."
-    return meta, pages, preview
-
-def get_preview(path: Path) -> Tuple[Dict[str, Any], Optional[int], str]:
-    if path.suffix.lower() == ".pdf":
-        return pdf_preview(path)
-    return {"_note": "no_preview"}, None, ""
-
-# =============================================================================
-# DB / RULES
-# =============================================================================
-
-def ensure_db():
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
-
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS documenti (
-        id INTEGER PRIMARY KEY,
-        nome_file TEXT,
-        sha1 TEXT,
-        dimensione_file INTEGER,
-        data_ultima_modifica TEXT,
-        numero_pagine INTEGER,
-        tipo_documento TEXT,
-        rgnr TEXT,
-        anno INTEGER,
-        procura TEXT,
-        status TEXT,
-        evidence_occ TEXT,
-        conf_occ REAL,
-        snippet_testo TEXT,
-        data_inserimento TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )
-    """)
-
-    cur.execute("PRAGMA table_info(documenti)")
-    cols = {row[1] for row in cur.fetchall()}
-
-    def add_col(name: str, coltype: str):
-        if name not in cols:
-            cur.execute(f"ALTER TABLE documenti ADD COLUMN {name} {coltype}")
-
-    add_col("tipo_file", "TEXT")
-    add_col("text_preview", "TEXT")
-    add_col("pdf_meta_json", "TEXT")
-    add_col("nome_file_orig", "TEXT")
-    add_col("nome_file_prev", "TEXT")
-    add_col("rename_evidence", "TEXT")
-    add_col("percorso_file", "TEXT")
-    add_col("percorso_prev", "TEXT")
-    add_col("percorso_evidence", "TEXT")
-    add_col("dda_flag", "INTEGER")
-    add_col("operazione_nome", "TEXT")
-    add_col("nome_indagine", "TEXT")
-    add_col("forza_polizia", "TEXT")
-    add_col("categoria_secondaria", "TEXT")
-
-    add_col("is_scan", "INTEGER")
-    add_col("has_rgnr_hint", "INTEGER")
-    add_col("rgnr_hint", "TEXT")
-    add_col("anno_hint", "INTEGER")
-    add_col("hint_text", "TEXT")
-
-    add_col("motivo_revisione", "TEXT")
-    add_col("retry_count", "INTEGER")
-    add_col("last_retry_at", "TEXT")
-    add_col("manual_required", "INTEGER")
-    add_col("manual_note", "TEXT")
-    add_col("esito_revisione", "TEXT")
-
-    # classificazione rigida (nuovo)
-    add_col("class_score", "INTEGER")
-    add_col("class_trace", "TEXT")
-    add_col("class_forced", "TEXT")
-    add_col("note", "TEXT")
-
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_doc_sha1 ON documenti(sha1)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_doc_status ON documenti(status)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_doc_tipo ON documenti(tipo_documento)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_doc_cat2 ON documenti(categoria_secondaria)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_doc_manual_required ON documenti(manual_required)")
-    cur.execute("CREATE INDEX IF NOT EXISTS idx_doc_retry_count ON documenti(retry_count)")
-
-    # tabella regole (minima)
-    cur.execute("""
-    CREATE TABLE IF NOT EXISTS regole_classificazione (
-        id INTEGER PRIMARY KEY,
-        classe TEXT NOT NULL,
-        marker TEXT NOT NULL,
-        peso INTEGER NOT NULL DEFAULT 1,
-        tipo_marker TEXT NOT NULL DEFAULT 'forte'  -- forte/debole/blacklist
-    )
-    """)
-
-    con.commit()
-    con.close()
-
-
-def seed_rules_if_empty():
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
-    cur.execute("SELECT COUNT(*) FROM regole_classificazione")
-    n = cur.fetchone()[0]
-    if n and n > 0:
-        con.close()
-        return
-
-    rules = [
-        # OCC (forti)
-        ("OCC", "ordinanza di applicazione di misura cautelare", 6, "forte"),
-        ("OCC", "ordinanza di custodia cautelare", 6, "forte"),
-        ("OCC", "richiesta per l’applicazione di misure cautelari", 7, "forte"),
-        ("OCC", "richiesta per l'applicazione di misure cautelari", 7, "forte"),
-        ("OCC", "custodia cautelare", 4, "forte"),
-        ("OCC", "misura cautelare", 3, "debole"),
-        ("OCC", "giudice per le indagini preliminari", 3, "debole"),
-        ("OCC", "gip", 2, "debole"),
-
-        # INFORMATIVA (forti)
-        ("INFORMATIVA", "comunicazione di notizia di reato", 7, "forte"),
-        ("INFORMATIVA", "informativa di reato", 5, "forte"),
-        ("INFORMATIVA", "notizia di reato", 4, "debole"),
-
-        # RELAZIONE / ANNOTAZIONI (placeholder per step successivi)
-        ("RELAZIONE", "relazione di servizio", 5, "forte"),
-        ("ANNOTAZIONE", "annotazione", 4, "forte"),
-
-        # Blacklist OCC (esempi tipici “non atto cautelare”)
-        ("OCC", "camera dei deputati", -10, "blacklist"),
-        ("OCC", "senato della repubblica", -10, "blacklist"),
-        ("OCC", "disegni di legge", -10, "blacklist"),
-        ("OCC", "rassegna stampa", -8, "blacklist"),
-    ]
-
-    cur.executemany(
-        "INSERT INTO regole_classificazione (classe, marker, peso, tipo_marker) VALUES (?,?,?,?)",
-        rules
-    )
-    con.commit()
-    con.close()
-
-
-def fetch_doc_by_sha1(sha1: str):
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
-    cur.execute("""
-        SELECT id, nome_file, tipo_documento, rgnr, anno, procura, dda_flag,
-               operazione_nome, nome_indagine, status, percorso_file, forza_polizia,
-               text_preview, snippet_testo,
-               motivo_revisione, retry_count, manual_required,
-               class_score, class_trace, class_forced, note
-        FROM documenti
-        WHERE sha1=?
-        LIMIT 1
-    """, (sha1,))
-    row = cur.fetchone()
-    con.close()
-    return row
-
-
-def db_update_identity(doc_id: int, new_name: str, new_rel_path: str, file_size: int, mtime_str: str):
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
-    cur.execute("SELECT nome_file, percorso_file FROM documenti WHERE id=? LIMIT 1", (doc_id,))
-    row = cur.fetchone()
-    old_name = row[0] if row else None
-    old_path = row[1] if row else None
-
-    updates = {
-        "dimensione_file": file_size,
-        "data_ultima_modifica": mtime_str,
-    }
-    if old_name != new_name:
-        updates["nome_file_prev"] = old_name
-        updates["nome_file"] = new_name
-    if old_path != new_rel_path:
-        updates["percorso_prev"] = old_path
-        updates["percorso_file"] = new_rel_path
-
-    set_clause = ", ".join([f"{k}=?" for k in updates.keys()])
-    params = list(updates.values()) + [doc_id]
-    cur.execute(f"UPDATE documenti SET {set_clause} WHERE id=?", params)
-    con.commit()
-    con.close()
-
-
-def is_final_status(status: Optional[str]) -> bool:
-    return (status or "").upper().strip() in FINAL_STATUSES
-
-
-def is_path_in_input(percorso_file: Optional[str]) -> bool:
-    if not percorso_file:
-        return True
-    p = percorso_file.replace("/", "\\").lower()
-    return p.startswith("input_documenti\\") or p == "input_documenti"
-
-
-def unique_path(target: Path) -> Path:
-    if not target.exists():
-        return target
-    parent = target.parent
-    stem = target.stem
-    suf = target.suffix
-    for i in range(1, 1000):
-        cand = parent / f"{stem} ({i:02d}){suf}"
-        if not cand.exists():
-            return cand
-    raise RuntimeError("Troppi conflitti nome.")
-
-
-def move_to_duplicati(file_path: Path) -> Path:
-    DUP_DIR.mkdir(parents=True, exist_ok=True)
-    target = unique_path(DUP_DIR / file_path.name)
-    file_path.rename(target)
-    return target
-
-
-def move_occ_to_revisione(file_path: Path, sha1: str) -> Tuple[bool, str]:
-    REV_OCC_DIR.mkdir(parents=True, exist_ok=True)
-    target = unique_path(REV_OCC_DIR / file_path.name)
-    try:
-        file_path.rename(target)
-    except Exception as e:
-        return False, f"move_revisione_fail:{e}"
-
-    new_rel = str(target.relative_to(PROJECT_ROOT)).replace("/", "\\")
-    old_rel = str(Path("input_documenti") / file_path.name).replace("/", "\\")
-
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
-    cur.execute("SELECT id, nome_file, percorso_file FROM documenti WHERE sha1=? LIMIT 1", (sha1,))
-    row = cur.fetchone()
-    if not row:
-        con.close()
-        return False, "db_missing_for_revisione"
-
-    doc_id, old_name, old_path = row
-
-    cur.execute("""
-        UPDATE documenti
-        SET status='REVISIONE_OCC',
-            tipo_documento='OCC',
-            percorso_prev=?,
-            percorso_file=?,
-            nome_file_prev=?,
-            nome_file=?,
-            motivo_revisione=COALESCE(motivo_revisione, 'MISSING_FIELDS')
-        WHERE id=?
-    """, (old_path or old_rel, new_rel, old_name, target.name, doc_id))
-
-    con.commit()
-    con.close()
-    return True, f"moved_to:{new_rel}"
-
-
-def run_worker(script_rel: Path, args: List[str]) -> Tuple[bool, str]:
-    script = (PROJECT_ROOT / script_rel).resolve()
-    if not script.exists():
-        return False, f"worker_missing:{script}"
-    cmd = [sys.executable, str(script)] + args
-    proc = subprocess.run(cmd, cwd=str(PROJECT_ROOT), capture_output=True, text=True)
-    if proc.returncode != 0:
-        return False, (proc.stderr or proc.stdout or "worker_failed").strip()
-    return True, (proc.stdout or "").strip()
-
-
-def iter_input_files() -> List[Path]:
-    if not INPUT_DIR.exists():
-        return []
-    out = []
-    for p in INPUT_DIR.iterdir():
-        if not p.is_file():
-            continue
-        if p.parent.name.lower() == "duplicati":
-            continue
-        if p.suffix.lower() in ALLOWED_EXTS:
-            out.append(p)
-    return sorted(out)
-
-
-def db_insert_new_file(f: Path, sha1: str, rel_path: str) -> None:
-    meta, pages, preview = get_preview(f)
-
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
-
-    # default neutro, poi classifichiamo con regole
-    tipo_doc = "ALTRO"
-    status = "NEEDS_DEEPER_ANALYSIS"
-
-    cur.execute("""
-        INSERT INTO documenti
-        (nome_file, sha1, dimensione_file, data_ultima_modifica, numero_pagine,
-         tipo_documento, rgnr, anno, procura, status,
-         evidence_occ, conf_occ, snippet_testo,
-         tipo_file, text_preview, pdf_meta_json,
-         nome_file_orig, percorso_file,
-         categoria_secondaria)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (
-        f.name, sha1, f.stat().st_size, format_mtime(f.stat().st_mtime), pages,
-        tipo_doc, None, None, None, status,
-        None, None,
-        (preview or "")[:500],
-        f.suffix.lower().lstrip("."),
-        preview,
-        json.dumps(meta, ensure_ascii=False),
-        f.name,
-        rel_path,
-        None
-    ))
-    con.commit()
-    con.close()
-
-
-def db_update_classification(doc_id: int, tipo: str, status: str, score: int, trace: str, forced: Optional[str]):
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
-    cur.execute("""
-        UPDATE documenti
-        SET tipo_documento=?, status=?, class_score=?, class_trace=?, class_forced=?
-        WHERE id=?
-    """, (tipo, status, int(score), trace, forced, doc_id))
-    con.commit()
-    con.close()
-
-
-def score_with_rules(preview_text: str, filename: str) -> Tuple[str, int, str, Optional[str]]:
-    """
-    Applica regole dal DB e decide una classe.
-    Ritorna: (classe, score, trace, forced)
-    """
-    text = (preview_text or "")
-    name = Path(filename).stem
-
-    con = sqlite3.connect(DB_PATH)
-    cur = con.cursor()
-    cur.execute("SELECT classe, marker, peso, tipo_marker FROM regole_classificazione")
-    rules = cur.fetchall()
-    con.close()
-
-    scores: Dict[str, int] = {}
-    trace_parts: List[str] = []
-
-    forced: Optional[str] = None
-
-    def add(cl: str, val: int, why: str):
-        scores[cl] = scores.get(cl, 0) + int(val)
-        trace_parts.append(f"{cl}:{val}:{why}")
-
-    for cl, marker, peso, tipo_marker in rules:
-        marker_l = (marker or "").lower().strip()
-        if not marker_l:
-            continue
-
-        hit = False
-        if marker_l in text.lower():
-            hit = True
-        if marker_l in name.lower():
-            hit = True
-
-        if not hit:
-            continue
-
-        if (tipo_marker or "").lower() == "blacklist":
-            add(cl, int(peso), f"BLACK:{marker_l}")
-        else:
-            add(cl, int(peso), f"hit:{marker_l}")
-
-    # decisione: scegli max score
-    if not scores:
-        return "ALTRO", 0, "no_rules_hit", None
-
-    best_cls = max(scores.items(), key=lambda kv: kv[1])[0]
-    best_score = scores[best_cls]
-
-    # soglia minima: se score < 3 -> ALTRO
-    if best_score < 3:
-        return "ALTRO", best_score, " | ".join(trace_parts), None
-
-    return best_cls, best_score, " | ".join(trace_parts), forced
-
-
-def main():
-    keep_last_n_files(LOG_DIR, n=5)
-
-    LIB_DIR.mkdir(parents=True, exist_ok=True)
-    (LIB_DIR / "revisione" / "occ").mkdir(parents=True, exist_ok=True)
-    (LIB_DIR / "report").mkdir(parents=True, exist_ok=True)
-
-    ensure_db()
-    seed_rules_if_empty()
-
-    files = iter_input_files()
-
-    print(f"[INFO] DB: {DB_PATH}")
-    print(f"[INFO] Input: {INPUT_DIR}")
-    print(f"[INFO] File trovati: {len(files)}")
-    print(f"[INFO] PDF lib: {PDF_LIB or 'NONE'}\n")
-
-    for f in files:
-        ext = f.suffix.lower()
-        ocr_state = "⏭"
-        rn_state = "⏭"
-        mv_state = "⏭"
-        note_msg = ""
-
-        sha1 = sha1_file(f)
-
-        # ==========================================================
-        # DUPLICATI (VERI) -> input_documenti\duplicati e STOP
-        # ==========================================================
-        existing = fetch_doc_by_sha1(sha1)
-        if existing:
-            (_id, _nome, _tipo, _rgnr, _anno, _proc, _dda, _op, _nomeind, _status, _percorso, _forza,
-             _tp, _snip, _mr, _rc, _man, _cs, _ct, _cf, _note) = existing
-            dup_vero = is_final_status(_status) or (not is_path_in_input(_percorso))
-            if dup_vero:
-                try:
-                    moved = move_to_duplicati(f)
-                    print(f"[DUP] {f.name} -> spostato in input_documenti\\duplicati\\{moved.name} (sha1 già presente)")
-                except Exception as e:
-                    print(f"[DUP] {f.name} -> sha1 già presente ma move duplicati FALLITO: {e}")
-                continue
-
-        rel_path = str(Path("input_documenti") / f.name)
-
-        # INSERT/UPDATE identity
-        if existing:
-            db_update_identity(existing[0], f.name, rel_path, f.stat().st_size, format_mtime(f.stat().st_mtime))
-        else:
-            db_insert_new_file(f, sha1, rel_path)
-
-        row = fetch_doc_by_sha1(sha1)
-        if not row:
-            print(f"{f.name} | INSERT ⚠️ | OCR ⏭ | RENAME ⏭ | MOVE ⏭ | NOTE db_missing_after_insert")
-            continue
-
-        (doc_id, db_nome_file, tipo_doc, rgnr, anno, procura, dda_flag,
-         operazione_nome, nome_indagine, status, percorso_file, forza_polizia,
-         text_preview, snippet_testo, motivo_rev, retry_count, manual_required,
-         class_score, class_trace, class_forced, note_db) = row
-
-        # ==========================================================
-        # PRE-PROCESS PER ESTENSIONE (DOC/RTF/TXT SEMPRE)
-        # ==========================================================
-        if ext in (".doc", ".docx", ".rtf", ".txt"):
-            ok_doc, msg_doc = run_worker(Path("script/workers/organizzatore_doc_reader.py"), ["--file", db_nome_file])
-            ocr_state = mark(ok_doc)
-            if not ok_doc and not note_msg:
-                note_msg = msg_doc
-
-        # ==========================================================
-        # CLASSIFICAZIONE RIGIDA (tabella regole) su preview + nome file
-        # ==========================================================
-        # ricarica preview aggiornato dopo doc_reader
-        row = fetch_doc_by_sha1(sha1)
-        (doc_id, db_nome_file, tipo_doc, rgnr, anno, procura, dda_flag,
-         operazione_nome, nome_indagine, status, percorso_file, forza_polizia,
-         text_preview, snippet_testo, motivo_rev, retry_count, manual_required,
-         class_score, class_trace, class_forced, note_db) = row
-
-        decided_tipo, score, trace, forced = score_with_rules(text_preview or "", db_nome_file)
-
-        # aggiorna solo se cambia
-        tipo_doc_new = decided_tipo
-        status_new = "CLASSIFIED" if decided_tipo == "OCC" else "NEEDS_DEEPER_ANALYSIS"
-
-        if (tipo_doc_new != (tipo_doc or "")) or (status_new != (status or "")) or (trace != (class_trace or "")) or (int(score) != int(class_score or 0)):
-            db_update_classification(doc_id, tipo_doc_new, status_new, int(score), trace, forced)
-
-        # ricarica post-update
-        row = fetch_doc_by_sha1(sha1)
-        (doc_id, db_nome_file, tipo_doc, rgnr, anno, procura, dda_flag,
-         operazione_nome, nome_indagine, status, percorso_file, forza_polizia,
-         text_preview, snippet_testo, motivo_rev, retry_count, manual_required,
-         class_score, class_trace, class_forced, note_db) = row
-
-        tipo_up = (tipo_doc or "").upper()
-
-        # ==========================
-        # NON-OCC:
-        # - se nel nome c'è OCC/OCCC -> label fix rename (v16) e poi prosegue
-        # - se anno noto -> percorso (libreria\YYYY)
-        # - se anno assente -> vari_verbali
-        # ==========================
-        if tipo_up != "OCC":
-            _ok_probe, _msg_probe = run_worker(Path("script/workers/organizzatore_altro_probe.py"), ["--file", db_nome_file])
-
-            # Se NON-OCC ma nel nome c'è "OCC/OCCC", correggiamo l'etichetta col rename (v16)
-            # (es: "OCC FEHIDA.doc" -> "INFORMATIVA FEHIDA.doc")
-            if filename_has_occ_token(db_nome_file):
-                _ok_rn_fix, _msg_rn_fix = run_worker(Path("script/workers/organizzatore_rename.py"), ["--file", db_nome_file])
-                rn_state = mark(_ok_rn_fix)
-                if (not _ok_rn_fix) and (not note_msg):
-                    note_msg = _msg_rn_fix
-                row_fix = fetch_doc_by_sha1(sha1)
-                if row_fix:
-                    db_nome_file = row_fix[1]
-                    tipo_doc = row_fix[2]
-                    anno = row_fix[4]
-                    status = row_fix[9]
-                    percorso_file = row_fix[10]
-
-            if anno:
-                ok_mv, msg_mv = run_worker(Path("script/workers/organizzatore_percorso.py"), ["--file", db_nome_file])
-                mv_state = mark(ok_mv)
-                if not ok_mv and not note_msg:
-                    note_msg = msg_mv
-
-                row_v = fetch_doc_by_sha1(sha1)
-                extra = f"{fmt_tipo(row_v[2])} anno={row_v[4]} status={row_v[9]} path={row_v[10]}"
-                print(f"{f.name} | OCR {ocr_state} | RENAME {rn_state} | MOVE {mv_state} | {extra}" + (f" | NOTE {note_msg}" if note_msg else ""))
-                continue
-
-            ok_vv, msg_vv = run_worker(Path("script/workers/organizzatore_vari_verbali.py"), ["--file", db_nome_file])
-            mv_state = mark(ok_vv)
-            if not ok_vv and not note_msg:
-                note_msg = msg_vv
-
-            row_v = fetch_doc_by_sha1(sha1)
-            extra = f"{fmt_tipo(row_v[2])} score={row_v[17] or 0} forced={row_v[19]} status={row_v[9]} path={row_v[10]}"
-            print(f"{f.name} | OCR {ocr_state} | RENAME {rn_state} | MOVE {mv_state} | {extra}" + (f" | NOTE {note_msg}" if note_msg else ""))
-            continue
-
-        # ==========================
-        # OCC: estrazione rapida specifica (PDF)
-        # ==========================
-        if ext == ".pdf":
-            ok, msg = run_worker(Path("script/workers/organizzatore_occ_ocr_rgnr.py"), ["--file", db_nome_file])
-            if ocr_state == "⏭":
-                ocr_state = mark(ok)
-            if not ok and not note_msg:
-                note_msg = msg
-
-        # ricarica per gating OCC
-        row2 = fetch_doc_by_sha1(sha1)
-        has_rgnr = bool(row2[3] and RE_RGNR_PARSE.search(str(row2[3])))
-        has_anno = bool(row2[4])
-        has_proc = bool((row2[5] or "").strip())
-
-        # Completo -> rename + move anno
-        if has_rgnr and has_anno and has_proc and (row2[9] or "").upper() not in ("NEEDS_READER", "NEEDS_DEEPER_ANALYSIS", "STANDBY"):
-            ok_rn, msg_rn = run_worker(Path("script/workers/organizzatore_rename.py"), ["--file", row2[1]])
-            rn_state = mark(ok_rn)
-            if not ok_rn and not note_msg:
-                note_msg = msg_rn
-
-            row3 = fetch_doc_by_sha1(sha1)
-            ok_mv, msg_mv = run_worker(Path("script/workers/organizzatore_percorso.py"), ["--file", row3[1]])
-            mv_state = mark(ok_mv)
-            if not ok_mv and not note_msg:
-                note_msg = msg_mv
-
-            final = fetch_doc_by_sha1(sha1)
-            extra = f"{fmt_tipo(final[2])} rgnr={final[3]} anno={final[4]} dda={final[6]} procura={final[5]} status={final[9]} path={final[10]}"
-            print(f"{f.name} | OCR {ocr_state} | RENAME {rn_state} | MOVE {mv_state} | {extra}" + (f" | NOTE {note_msg}" if note_msg else ""))
-            continue
-
-        # Incompleto -> revisione OCC
-        ok_rev, msg_rev = move_occ_to_revisione(f, sha1)
-        mv_state = mark(ok_rev)
-        if not ok_rev and not note_msg:
-            note_msg = msg_rev
-
-        rowf = fetch_doc_by_sha1(sha1)
-        extra = f"{fmt_tipo(rowf[2])} rgnr={rowf[3]} anno={rowf[4]} dda={rowf[6]} procura={rowf[5]} status={rowf[9]} path={rowf[10]}"
-        print(f"{f.name} | OCR {ocr_state} | RENAME {rn_state} | MOVE {mv_state} | {extra}" + (f" | NOTE {note_msg}" if note_msg else ""))
-
-    # report
-    ok_rep, msg_rep = run_worker(Path("script/workers/organizzatore_report_errori.py"), [])
-    if ok_rep and msg_rep:
-        print("\n[REPORT] " + msg_rep)
-    elif not ok_rep:
-        print("\n[REPORT] ⚠️ " + msg_rep)
-
-    # ROUTER REVISIONE
-    ok_router, msg_router = run_worker(Path("script/workers/organizzatore_revisione_router.py"), [])
-    if ok_router and msg_router:
-        print("\n[REVISIONE] " + msg_router)
-    elif not ok_router:
-        print("\n[REVISIONE] ⚠️ " + msg_router)
-
-    print("\n[NOTE] Pipeline completata.\n")
-=======
 Organizzatore.py (v2 - ANNO + RGNR adiacente)
 Smista documenti giudiziari per ANNO (cartelle YYYY) estraendo il "Procedimento Penale/anno"
 accanto alle diciture RGNR / R.G.N.R. (o R.G.I.P., R.O.C.C., ecc.), con OCR di fallback.
 """
+
+# =============================================================================
+# NOTE DI PROGETTO (SANGIA) — REGOLA DI CATALOGAZIONE
+# - RGNR primario con anno procedimento (fonte principale), eventuale flag DDA
+# - Procura estratta dall'intestazione (TRIBUNALE/PROCURA/DDA DI ...)
+# - RGIP/ROCC sono secondari: non guidano lo smistamento annuale
+# - Per OCC: lettura mirata epigrafe prime pagine (1,2,3,4 + supporto ultima)
+# =============================================================================
 
 import os
 import sys
@@ -751,14 +42,20 @@ except Exception:
 
 
 def _detect_project_root() -> Path:
-    current = Path(__file__).resolve()
-    for parent in [current.parent, *current.parents]:
-        if parent.name.upper() == "SANGIA":
-            return parent
-    return current.parent
+    """Root progetto portabile: directory che contiene questo script."""
+    return Path(__file__).resolve().parent
 
 
 PROJECT_ROOT = _detect_project_root()
+
+
+def _display_path(path: Path) -> str:
+    """Mostra percorsi come SANGIA/... senza prefisso assoluto del PC locale."""
+    try:
+        rel = path.resolve().relative_to(PROJECT_ROOT.resolve())
+        return f"{PROJECT_ROOT.name}/{rel.as_posix()}"
+    except Exception:
+        return str(path)
 LIBRERIA_BASE_PATH = PROJECT_ROOT / "libreria"
 INPUT_BASE_PATH = PROJECT_ROOT / "input_documenti"
 BACKUP_BASE_PATH = PROJECT_ROOT / "Backup"
@@ -883,7 +180,7 @@ def ensure_manual_overrides_template():
         manual_overrides_path.parent.mkdir(parents=True, exist_ok=True)
         with open(manual_overrides_path, "w", encoding="utf-8", newline="") as f:
             f.write("file;anno;tipo_documento;rgnr;procura;destinazione;note\n")
-        logging.info("Creato template override manuali: %s", manual_overrides_path)
+        logging.info("Creato template override manuali: %s", _display_path(manual_overrides_path))
     except Exception as e:
         logging.warning("Impossibile creare template override %s: %s", manual_overrides_path, e)
 
@@ -899,13 +196,12 @@ def _append_error_report(file_name: str, reason: str):
 
 
 def move_to_error(file_path: Path, reason: str):
+    """Sposta il file in Errori senza creare copie: sovrascrive eventuale omonimo."""
     error_path.mkdir(parents=True, exist_ok=True)
     dest = error_path / file_path.name
     try:
         if dest.exists():
-            stem = file_path.stem
-            suffix = file_path.suffix
-            dest = error_path / f"{stem}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}{suffix}"
+            dest.unlink()
         shutil.move(str(file_path), str(dest))
     except Exception as e:
         logging.error("Errore spostamento in cartella errori %s: %s", file_path.name, e)
@@ -1271,33 +567,13 @@ def get_text_from_file(file_path: Path, ocr_reader):
         try:
             with fitz.open(file_path) as doc:
                 meta["numero_pagine"] = doc.page_count
-                digital_parts = []
-                for i in range(doc.page_count):
-                    digital_parts.append(doc.load_page(i).get_text() or "")
-                    if len("".join(digital_parts)) >= MAX_CHARS_FOR_SEARCH:
-                        break
-                digital_text = " ".join(digital_parts)[:MAX_CHARS_FOR_SEARCH]
-                if _text_quality_score(digital_text) >= 20 and len(digital_text.strip()) >= 120:
-                    text_content = digital_text
-                    meta["text_source"] = "pdf_text"
-                else:
-                    meta["needs_ocr"] = 1
-                    indexes = set(range(min(3, doc.page_count)))
-                    if doc.page_count > 0:
-                        indexes.add(doc.page_count - 1)
-                    if doc.page_count > 2:
-                        indexes.add(doc.page_count // 2)
-                    sample_parts = []
-                    for i in sorted(indexes):
-                        page = doc.load_page(i)
-                        pix = page.get_pixmap(matrix=fitz.Matrix(2, 2))
-                        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-                        sample_parts.append(_ocr_image_np(np.array(img), ocr_reader))
-                        if len(" ".join(sample_parts)) >= MAX_CHARS_FOR_SEARCH:
-                            break
-                    text_content = " ".join(sample_parts)[:MAX_CHARS_FOR_SEARCH]
-                    meta["text_source"] = "ocr"
-                    meta["ocr_sample_only"] = 1
+
+            # Strategia mirata epigrafe: pagine 1,2,3,4 (+ ultima solo supporto se necessario)
+            first_text, src, _pages = _extract_primary_pages_pdf(file_path, ocr_reader, max_pages=4, max_chars=MAX_CHARS_FOR_SEARCH)
+            text_content = first_text
+            meta["text_source"] = src
+            meta["needs_ocr"] = 1 if src == "ocr" else 0
+            meta["ocr_sample_only"] = 0
         except Exception as e:
             logging.error(f"Errore lettura PDF: {file_path.name}. Dettaglio: {e}")
 
@@ -1347,6 +623,161 @@ def find_near_pairs(text_upper: str, token_spans, window: int = 60):
     return [(a, b, c) for _, a, b, c in ranked]
 
 
+def _extract_primary_pages_pdf(file_path: Path, ocr_reader, max_pages: int = 4, max_chars: int = 7000):
+    text_parts = []
+    text_source = "pdf_text"
+    pages_scanned = 0
+    used_ocr = False
+
+    with fitz.open(file_path) as doc:
+        total = doc.page_count
+        page_indexes = [i for i in range(min(max_pages, total))]
+        support_indexes = []
+        if total > 4:
+            support_indexes.append(total - 1)
+
+        for i in page_indexes:
+            pages_scanned += 1
+            pg = doc.load_page(i)
+            txt = (pg.get_text() or "").strip()
+            if _text_quality_score(txt) < 15:
+                pix = pg.get_pixmap(matrix=fitz.Matrix(2, 2))
+                img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                txt = _ocr_image_np(np.array(img), ocr_reader)
+                used_ocr = True
+            text_parts.append(txt)
+            if len(" ".join(text_parts)) >= max_chars:
+                break
+
+        merged = " ".join(text_parts)
+        if len(merged.strip()) < 300 and support_indexes:
+            for i in support_indexes:
+                pg = doc.load_page(i)
+                txt = (pg.get_text() or "").strip()
+                if _text_quality_score(txt) < 15:
+                    pix = pg.get_pixmap(matrix=fitz.Matrix(2, 2))
+                    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+                    txt = _ocr_image_np(np.array(img), ocr_reader)
+                    used_ocr = True
+                text_parts.append(txt)
+                break
+
+    if used_ocr:
+        text_source = "ocr"
+    return " ".join(text_parts)[:max_chars], text_source, pages_scanned
+
+
+def choose_primary_rgnr(text_upper: str):
+    """Seleziona RGNR primario e secondari (RGIP/ROCC), con flag DDA."""
+    result = {
+        "primary_num": None,
+        "primary_year": None,
+        "primary_label": None,
+        "secondary": [],
+        "dda": 0,
+    }
+
+    pat_pair = re.compile(r"(?:N\.?\s*)?(\d{1,6})\s*[/\-]\s*(\d{2,4})")
+    pat_rgnr = re.compile(r"R\s*\.?\s*G\s*\.?\s*N\s*\.?\s*R\s*\.?|RGNR", re.IGNORECASE)
+    pat_rgip = re.compile(r"R\s*\.?\s*G\s*\.?\s*I\s*\.?\s*P\s*\.?|RGIP", re.IGNORECASE)
+    pat_rocc = re.compile(r"R\s*\.?\s*O\s*\.?\s*C\s*\.?\s*C\s*\.?|ROCC", re.IGNORECASE)
+
+    candidates = []
+    for m in pat_pair.finditer(text_upper):
+        num, yraw = m.group(1), m.group(2)
+        yr = normalize_year(yraw)
+        if not yr:
+            continue
+
+        around = text_upper[max(0, m.start()-50):min(len(text_upper), m.end()+50)]
+        label = None
+        weight = 20
+        if pat_rgnr.search(around):
+            label = "RGNR"
+            weight = 0
+        elif pat_rgip.search(around):
+            label = "RGIP"
+            weight = 10
+        elif pat_rocc.search(around):
+            label = "ROCC"
+            weight = 12
+
+        dda_here = bool(re.search(r"D\s*\.?\s*D\s*\.?\s*A\s*\.?", around, re.IGNORECASE))
+        candidates.append((weight, m.start(), num, yr, label or "UNK", dda_here))
+
+    if not candidates:
+        return result
+
+    candidates.sort(key=lambda x: (x[0], x[1]))
+    _w, _pos, num, yr, lbl, dda_here = candidates[0]
+    result["primary_num"] = num
+    result["primary_year"] = yr
+    result["primary_label"] = lbl
+    result["dda"] = 1 if dda_here else 0
+
+    for item in candidates[1:]:
+        _w2, _p2, n2, y2, l2, _d2 = item
+        result["secondary"].append({"label": l2, "riferimento": f"{n2}/{y2}"})
+
+    if yr and yr < 1990:
+        for _w2, _p2, n2, y2, l2, d2 in candidates:
+            if y2 >= 1990 and l2 == "RGNR":
+                result["primary_num"] = n2
+                result["primary_year"] = y2
+                result["primary_label"] = l2
+                result["dda"] = 1 if d2 else result["dda"]
+                break
+
+    return result
+
+
+def build_new_filename(old_name: str, document_type: str, operazione_nome: str | None, rgnr_num: str | None, year: int | None, keep_old_stem: bool = False):
+    old_path = Path(old_name)
+    ext = old_path.suffix
+    old_stem = old_path.stem
+
+    doc_prefix_map = {
+        "Ordinanza di Custodia Cautelare in Carcere": "OCC",
+        "Sentenza": "SENTENZA",
+        "Annotazione di Polizia Giudiziaria": "ANNOTAZIONE",
+        "Informativa": "INFORMATIVA",
+        "Dichiarazioni": "VERBALE",
+        "Ordinanza e Sequestro Preventivo": "SEQUESTRO",
+    }
+    prefix = doc_prefix_map.get(document_type, (document_type or "DOCUMENTO").upper())
+    prefix = re.sub(r"\s+", " ", prefix).strip()
+
+    pieces = [prefix]
+    if operazione_nome:
+        pieces.append(re.sub(r"\s+", " ", operazione_nome.upper()).strip())
+
+    if rgnr_num and year:
+        pieces.append(f"RGNR {rgnr_num}_{year}")
+    else:
+        return old_name
+
+    if keep_old_stem:
+        pieces.append(f"ORIG {old_stem}")
+
+    base = re.sub(r"\s+", " ", " ".join(x for x in pieces if x).strip())
+    base = re.sub(r"[\\/:*?\"<>|]", "_", base)
+    return f"{base}{ext}"
+
+
+def safe_rename_before_move(file_path: Path, new_name: str) -> Path:
+    if not new_name or new_name == file_path.name:
+        return file_path
+    dst = file_path.with_name(new_name)
+    if dst.exists() and dst != file_path:
+        dst = file_path.with_name(f"{Path(new_name).stem}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}{Path(new_name).suffix}")
+    try:
+        file_path.rename(dst)
+        return dst
+    except Exception as e:
+        logging.warning("Rinomina intelligente fallita (%s -> %s): %s", file_path.name, new_name, e)
+        return file_path
+
+
 def find_year_and_info_in_text(text: str):
     info = {
         "year": None,
@@ -1354,12 +785,21 @@ def find_year_and_info_in_text(text: str):
         "procura": None,
         "modello_rgnr": None,
         "is_comune_ordinance": False,
+        "dda": 0,
+        "secondary_refs": [],
     }
 
     text_upper = text.upper().replace("\n", " ")
     mp = re.search(r"(?:TRIBUNALE|PROCURA|CORTE|LEGIONE CARABINIERI|D\.?D\.?A\.?|COMUNE)\s+DI\s+([A-Z\s\(\)]+)", text_upper)
     if mp:
         info["procura"] = mp.group(1).strip()
+
+    primary = choose_primary_rgnr(text_upper)
+    if primary.get("primary_num") and primary.get("primary_year"):
+        info["year"] = primary["primary_year"]
+        info["rgnr"] = f"{primary['primary_num']}/{primary['primary_year']}"
+        info["dda"] = int(primary.get("dda") or 0)
+        info["secondary_refs"] = primary.get("secondary", [])
 
     if re.search(r"\bCOMUNE\s+DI\b", text_upper) and not re.search(
         r"\b(TRIBUNALE|PROCURA|R\.?\s*G\.?\s*N\.?\s*R\.?|RGNR|R\.?\s*G\.?\s*I\.?\s*P\.?)\b",
@@ -1394,11 +834,11 @@ def find_year_and_info_in_text(text: str):
             near_pos = text_upper.find(f"{num_str}/{year_str}")
             candidates.append((9, near_pos if near_pos >= 0 else 999999, num_str, year_str, yr))
 
-    if candidates:
+    if candidates and info["year"] is None:
         candidates.sort(key=lambda x: (x[0], x[1]))
-        _, _, num_raw, year_raw, year_norm = candidates[0]
+        _, _, num_raw, _year_raw, year_norm = candidates[0]
         info["year"] = year_norm
-        info["rgnr"] = f"{num_raw}/{year_raw}"
+        info["rgnr"] = f"{num_raw}/{year_norm}"
 
     if info["year"] is None:
         m = re.search(r"(\d{1,6})\s*[/\-]\s*(\d{2,4})", text_upper)
@@ -1406,10 +846,12 @@ def find_year_and_info_in_text(text: str):
             yr = normalize_year(m.group(2))
             if yr:
                 info["year"] = yr
-                info["rgnr"] = f"{m.group(1)}/{m.group(2)}"
+                info["rgnr"] = f"{m.group(1)}/{yr}"
 
     if info["rgnr"]:
-        idx = text_upper.find(info["rgnr"])
+        if re.search(r"D\.?D\.?A\.?", text_upper):
+            info["dda"] = 1
+        idx = text_upper.find((info["rgnr"] or "").split("/")[0])
         if idx != -1:
             mm = re.search(r"MOD\.?(?:ELLO)?[\s._\-]*(\d{2})", text_upper[idx : idx + 120])
             if mm and mm.group(1) in {"21", "44"}:
@@ -1437,6 +879,7 @@ def extract_year_from_text_dates(text: str):
 
 
 def build_dest_dir_by_year(base: Path, anno: int) -> Path:
+    """Destinazione piatta: solo cartella anno (nessuna sottocartella)."""
     return base / str(anno)
 
 
@@ -1480,7 +923,8 @@ def infer_year_from_filename(filename: str):
     return None
 
 
-def parse_title_hints(filename: str) -> dict:
+def parse_filename_context(filename: str) -> dict:
+    """Pre-analisi robusta del nome file senza inventare dati."""
     stem = Path(filename).stem
     t = stem.upper()
 
@@ -1488,44 +932,71 @@ def parse_title_hints(filename: str) -> dict:
         "document_type": None,
         "year": None,
         "rgnr": None,
+        "rgnr_candidates": [],
+        "operazione_nome": None,
+        "is_multipart": False,
+        "parte_label": None,
+        "is_subject_bundle": False,
     }
 
-    if re.search(r"\bSENTENZA\b", t):
-        hints["document_type"] = "Sentenza"
-
-    if "ANNOTAZIONE" in t:
-        hints["document_type"] = "Annotazione di Polizia Giudiziaria"
-    elif "RELAZIONE" in t:
-        hints["document_type"] = "Relazione di Servizio"
-    elif "ARTICOLO" in t:
-        hints["document_type"] = "Articolo di Giornale"
-
-    if re.search(r"\b(OCC|ORDINANZA)\b", t):
+    occ_tokens = r"(?:\bO\.?C\.?C\.?\b|\bORDINANZA\s+CUSTODIA\s+CAUTELARE\b|\bOPERAZIONE\b|\bOP\.?\b)"
+    if re.search(occ_tokens, t, re.IGNORECASE):
         hints["document_type"] = "Ordinanza di Custodia Cautelare in Carcere"
 
-    if re.search(r"\bPARTE\s*[_\- ]?(I|II|III|IV|V|1|2|3|4|5)\b", t):
-        hints["document_type"] = hints["document_type"] or "Ordinanza di Custodia Cautelare in Carcere"
+    if re.search(r"\bSENTENZA\b", t):
+        hints["document_type"] = hints["document_type"] or "Sentenza"
+    if re.search(r"\bANNOTAZIONE\b", t):
+        hints["document_type"] = hints["document_type"] or "Annotazione di Polizia Giudiziaria"
+    if re.search(r"\bRELAZIONE\b", t):
+        hints["document_type"] = hints["document_type"] or "Relazione di Servizio"
+    if re.search(r"\bARTICOLO\b", t):
+        hints["document_type"] = hints["document_type"] or "Articolo di Giornale"
+    if re.search(r"\bVERBALE\b", t):
+        hints["document_type"] = hints["document_type"] or "Dichiarazioni"
+    if re.search(r"\bINFORMATIVA\b", t):
+        hints["document_type"] = hints["document_type"] or "Informativa"
+
+    m_part = re.search(r"\bPARTE\s*[_\- ]?(I|II|III|IV|V|VI|VII|VIII|IX|X|\d{1,2})\b", t)
+    if m_part:
+        hints["is_multipart"] = True
+        hints["parte_label"] = m_part.group(1)
 
     if re.search(r"[A-ZÀ-ÖØ-Ý][A-ZÀ-ÖØ-Ýa-zà-öø-ÿ'`]+\s+[A-ZÀ-ÖØ-Ý][A-ZÀ-ÖØ-Ýa-zà-öø-ÿ'`]+\s*\+\s*\d+", stem):
+        hints["is_subject_bundle"] = True
         hints["document_type"] = hints["document_type"] or "Ordinanza di Custodia Cautelare in Carcere"
 
-    strong_patterns = [
-        r"(?:SENTENZA|SENT\.?|OCC|R\.?G\.?N\.?R\.?)[^\d]{0,20}(\d{1,6})\s*[/\-]\s*(\d{2,4})",
-        r"\bN\.?\s*(\d{1,6})\s*[/\-]\s*(\d{2,4})",
+    op_match = re.search(r"(?:\bOPERAZIONE\b|\bOP\.?\b|\bO\.?C\.?C\.?\b)[\s_\-:]+([A-Z0-9][A-Z0-9_\- ]{2,})", t)
+    if op_match:
+        op = op_match.group(1)
+        op = re.split(r"\b(?:RGNR|R\.?G\.?N\.?R\.?|R\.?G\.?I\.?P\.?|R\.?O\.?C\.?C\.?|PARTE|N\.)\b", op)[0]
+        op = re.sub(r"[_\-]+", " ", op).strip()
+        if op:
+            hints["operazione_nome"] = op
+
+    candidate_patterns = [
+        r"(?:R\.?G\.?N\.?R\.?|RGNR|RGRN|PP|PROC\.?\s*PEN\.?)[^\d]{0,12}(\d{1,6})\s*[!/_\-]\s*(\d{2,4})",
+        r"\b(\d{1,6})\s*[!/_\-]\s*(\d{2,4})\b",
     ]
-    for pat in strong_patterns:
-        m = re.search(pat, t, re.IGNORECASE)
-        if m:
-            yy = normalize_year(m.group(2))
-            if yy:
-                hints["year"] = yy
-                hints["rgnr"] = f"{m.group(1)}/{m.group(2)}"
-                break
+    for pat in candidate_patterns:
+        for m in re.finditer(pat, t, re.IGNORECASE):
+            yr = normalize_year(m.group(2))
+            if yr:
+                hints["rgnr_candidates"].append((m.group(1), yr))
+
+    if hints["rgnr_candidates"]:
+        num, yr = hints["rgnr_candidates"][0]
+        hints["rgnr"] = f"{num}/{yr}"
+        hints["year"] = yr
 
     if hints["year"] is None:
         hints["year"] = infer_year_from_filename(filename)
 
     return hints
+
+
+def parse_title_hints(filename: str) -> dict:
+    """Compat: alias storico verso parse_filename_context."""
+    return parse_filename_context(filename)
 
 
 def build_no_rule_reason(file_name: str, document_type: str, extracted_info: dict, filename_info: dict, title_hints: dict, final_year):
@@ -1583,8 +1054,11 @@ def process_file(file_path: Path, ocr_reader):
         return
 
     filename_info = extract_info_from_filename(file_name)
-    title_hints = parse_title_hints(file_name)
+    title_hints = parse_filename_context(file_name)
     manual_override = MANUAL_OVERRIDES.get(file_name)
+    if not title_hints.get("operazione_nome") and filename_info.get("operazione_nome"):
+        title_hints["operazione_nome"] = (filename_info.get("operazione_nome") or "").upper()
+
     text_content, moved_to_error, extraction_meta = get_text_from_file(file_path, ocr_reader)
     if moved_to_error:
         return
@@ -1600,7 +1074,20 @@ def process_file(file_path: Path, ocr_reader):
         move_to_error(file_path, f"Testo non leggibile o OCR insufficiente | chars={len((text_content or '').strip())}")
         return
 
+    if extraction_meta.get("tipo_file") == "pdf" and title_hints.get("document_type") == "Ordinanza di Custodia Cautelare in Carcere":
+        try:
+            occ_text, occ_source, _pages = _extract_primary_pages_pdf(file_path, ocr_reader, max_pages=4, max_chars=7000)
+            if _text_quality_score(occ_text) >= 15:
+                text_content = occ_text
+                extraction_meta["text_source"] = occ_source
+                extraction_meta["snippet_testo"] = occ_text[:280]
+        except Exception as e:
+            logging.warning("Lettura mirata epigrafe OCC fallita per %s: %s", file_name, e)
+
     extracted_info = find_year_and_info_in_text(text_content)
+    if not extracted_info.get("rgnr") and title_hints.get("rgnr"):
+        extracted_info["rgnr"] = title_hints.get("rgnr")
+        extracted_info["year"] = title_hints.get("year")
     found_year = extracted_info["year"]
     document_type = classify_document_type(text_content)
     if title_hints.get("document_type") is not None:
@@ -1648,6 +1135,15 @@ def process_file(file_path: Path, ocr_reader):
     if manual_override and manual_override.get("procura"):
         extracted_info["procura"] = manual_override["procura"]
 
+    if extracted_info.get("rgnr"):
+        mnorm = re.search(r"(\d{1,6})\s*[/\-]\s*(\d{2,4})", extracted_info["rgnr"])
+        if mnorm:
+            ny = normalize_year(mnorm.group(2))
+            if ny:
+                extracted_info["rgnr"] = f"{mnorm.group(1)}/{ny}"
+                if extracted_info.get("dda"):
+                    extracted_info["rgnr"] = f"{extracted_info['rgnr']} DDA"
+
     destination_override = (manual_override or {}).get("destinazione")
 
     target_path = None
@@ -1666,7 +1162,19 @@ def process_file(file_path: Path, ocr_reader):
     try:
         if manual_override:
             logging.info("Override manuale applicato a %s: %s", file_name, manual_override)
-        shutil.move(str(file_path), str(target_path / file_name))
+
+        rgnr_num_match = re.search(r"(\d{1,6})", extracted_info.get("rgnr") or "")
+        new_name = build_new_filename(
+            old_name=file_name,
+            document_type=document_type,
+            operazione_nome=title_hints.get("operazione_nome") or filename_info.get("operazione_nome"),
+            rgnr_num=rgnr_num_match.group(1) if rgnr_num_match else None,
+            year=final_year,
+            keep_old_stem=bool(title_hints.get("is_subject_bundle")),
+        )
+        current_path = safe_rename_before_move(file_path, new_name)
+        file_name = current_path.name
+        shutil.move(str(current_path), str(target_path / file_name))
         if not extracted_info.get("rgnr") and title_hints.get("rgnr"):
             extracted_info["rgnr"] = title_hints["rgnr"]
 
@@ -1678,7 +1186,7 @@ def process_file(file_path: Path, ocr_reader):
             tipo_documento=document_type,
             indagato_principale=filename_info.get("indagato_principale"),
             num_correi=filename_info.get("num_correi"),
-            operazione_nome=filename_info.get("operazione_nome"),
+            operazione_nome=title_hints.get("operazione_nome") or filename_info.get("operazione_nome"),
             data_riferimento_file=filename_info.get("data_riferimento_file"),
             modello_rgnr=extracted_info.get("modello_rgnr"),
             dimensione=dimensione,
@@ -1708,7 +1216,6 @@ def main():
     base_path.mkdir(parents=True, exist_ok=True)
     input_path.mkdir(parents=True, exist_ok=True)
     error_path.mkdir(parents=True, exist_ok=True)
-    varie_verbali_path.mkdir(parents=True, exist_ok=True)
     setup_database()
     ensure_manual_overrides_template()
     MANUAL_OVERRIDES = load_manual_overrides()
@@ -1717,8 +1224,8 @@ def main():
     report_counts["totale"] = len(files_to_process)
 
     if report_counts["totale"] == 0:
-        logging.info(f"Nessun file trovato da processare in {input_path}")
-        print(f"\n--- Report Finale ---\nNessun file trovato nella cartella {input_path}")
+        logging.info("Nessun file trovato da processare in %s", _display_path(input_path))
+        print(f"\n--- Report Finale ---\nNessun file trovato nella cartella {_display_path(input_path)}")
         print("Suggerimento: inserisci i file direttamente in input_documenti")
         return
 
@@ -1731,12 +1238,11 @@ def main():
     print(f"File Totali Considerati: {report_counts['totale']}")
     print(f"Smistati in cartelle anno: {report_counts['smistati_per_anno']}")
     print(f"File in cartella Errori: {report_counts['errori']}")
-    print(f"Report errori dettagliato: {error_report_path}")
+    print(f"Report errori dettagliato: {_display_path(error_report_path)}")
     print("Ogni riga include il motivo tecnico della mancata classificazione.")
     print(f"File saltati per duplicato SHA1: {report_counts['saltati_sha1']}")
     print(f"File saltati per duplicato nome: {report_counts['saltati_nome']}")
     print(f"File duplicati archiviati: {report_counts['duplicati_archiviati']}")
-main
 
 
 if __name__ == "__main__":

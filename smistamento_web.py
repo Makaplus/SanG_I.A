@@ -20,15 +20,31 @@ from tkinter import filedialog
 
 
 def detect_project_root() -> Path:
+codex/iniziare-progetto-libreria-atti-di-polizia-sri8es
+    """Root progetto portabile: directory che contiene questo script."""
+    return Path(__file__).resolve().parent
+=======
     current = Path(__file__).resolve()
     for parent in [current.parent, *current.parents]:
         if parent.name.upper() == "SANGIA":
             return parent
     return current.parent
+main
 
 
 PROJECT_ROOT = detect_project_root()
 
+codex/iniziare-progetto-libreria-atti-di-polizia-sri8es
+
+def display_path(path: Path) -> str:
+    try:
+        rel = path.resolve().relative_to(PROJECT_ROOT.resolve())
+        return f"{PROJECT_ROOT.name}/{rel.as_posix()}"
+    except Exception:
+        return str(path)
+
+=======
+main
 DB_PATH = PROJECT_ROOT / "libreria" / "documenti.db"
 BACKUP_DIR = PROJECT_ROOT / "Backup"
 INPUT_DIR = PROJECT_ROOT / "input_documenti"
@@ -583,7 +599,11 @@ class Handler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/overrides":
             rows = read_override_rows()
+ codex/iniziare-progetto-libreria-atti-di-polizia-sri8es
+            self._json(200, {"ok": True, "rows": rows, "path": display_path(OVERRIDES_PATH)})
+=======
             self._json(200, {"ok": True, "rows": rows, "path": str(OVERRIDES_PATH)})
+ main
             return
 
         if parsed.path == "/api/job":
@@ -639,7 +659,11 @@ class Handler(BaseHTTPRequestHandler):
                 with open(dst, "wb") as out:
                     shutil.copyfileobj(file_item.file, out)
 
+ codex/iniziare-progetto-libreria-atti-di-polizia-sri8es
+                self._json(200, {"ok": True, "imported_to": display_path(dst)})
+=======
                 self._json(200, {"ok": True, "imported_to": str(dst)})
+ main
             except Exception as e:
                 self._json(400, {"ok": False, "error": str(e)})
             return
@@ -749,6 +773,15 @@ def main():
     server = ThreadingHTTPServer(("127.0.0.1", 8765), Handler)
 
     print("SANG_I.A. Admin avviato: http://127.0.0.1:8765")
+ codex/iniziare-progetto-libreria-atti-di-polizia-sri8es
+    print(f"PROJECT_ROOT: {display_path(PROJECT_ROOT)}")
+    print(f"HTML_DIR: {display_path(HTML_DIR)}")
+    print(f"DB: {display_path(DB_PATH)}")
+    print(f"Backup dir: {display_path(BACKUP_DIR)}")
+    print(f"Input dir: {display_path(INPUT_DIR)}")
+    print(f"Override CSV: {display_path(OVERRIDES_PATH)}")
+    print(f"BAT: {display_path(START_SMISTAMENTO_BAT)}")
+=======
     print(f"PROJECT_ROOT: {PROJECT_ROOT}")
     print(f"HTML_DIR: {HTML_DIR}")
     print(f"DB: {DB_PATH}")
@@ -756,6 +789,7 @@ def main():
     print(f"Input dir: {INPUT_DIR}")
     print(f"Override CSV: {OVERRIDES_PATH}")
     print(f"BAT: {START_SMISTAMENTO_BAT}")
+    main
 
     try:
         import webbrowser
