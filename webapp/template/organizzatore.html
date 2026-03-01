@@ -22,7 +22,11 @@
 
 <div class="card">
   <h3>Inserire file</h3>
+codex/iniziare-progetto-libreria-atti-di-polizia-sri8es
   <div class="row responsive-row" style="margin-top:10px;">
+=======
+  <div class="row" style="margin-top:10px;">
+main
     <input id="importPath" placeholder="Percorso file da importare..." style="min-width:420px;">
     <input id="fileInput" type="file" style="display:none" />
     <button class="secondary" id="pickImportBtn">Sfoglia...</button>
@@ -37,6 +41,7 @@
 </div>
 
 <div class="card">
+codex/iniziare-progetto-libreria-atti-di-polizia-sri8es
   <h3>Revisione OCC (nuove logiche)</h3>
   <div class="muted" style="margin-bottom:10px;">
     Lancia il revisore in tre modalità: su DB (status <code>REVISIONE_OCC</code>), su cartella revisione, o su cartella revisione/occ.
@@ -49,6 +54,8 @@
 </div>
 
 <div class="card">
+=======
+main
   <div id="status" class="statusLine">Nessuna esecuzione avviata.</div>
   <pre id="events"></pre>
 </div>
@@ -149,10 +156,17 @@ async function importToInput(){
   importInfo.textContent='Importato in: '+d.imported_to;
 }
 
+codex/iniziare-progetto-libreria-atti-di-polizia-sri8es
 async function startJobFromEndpoint(endpoint, payload={}){
   lastEventCount=0;
   eventsEl.textContent='';
   const d=await (await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})).json();
+=======
+async function runSmistamento(){
+  lastEventCount=0;
+  eventsEl.textContent='';
+  const d=await (await fetch('/api/run-smistamento-job',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'})).json();
+main
   if(!d.ok){ statusEl.textContent='Errore: '+(d.error||''); return; }
   currentJobId=d.job_id;
   if(pollTimer) clearInterval(pollTimer);
@@ -160,6 +174,7 @@ async function startJobFromEndpoint(endpoint, payload={}){
   await pollJob();
 }
 
+codex/iniziare-progetto-libreria-atti-di-polizia-sri8es
 async function runSmistamento(){
   return startJobFromEndpoint('/api/run-smistamento-job',{});
 }
@@ -174,6 +189,11 @@ document.getElementById("runSmistamentoBtn").onclick=runSmistamento;
 document.getElementById("runRevisioneDbBtn").onclick=()=>runRevisione('db');
 document.getElementById("runRevisioneFolderBtn").onclick=()=>runRevisione('revisione');
 document.getElementById("runRevisioneOccBtn").onclick=()=>runRevisione('occ');
+=======
+document.getElementById("pickImportBtn").onclick=pickImportFile;
+document.getElementById("importBtn").onclick=importToInput;
+document.getElementById("runSmistamentoBtn").onclick=runSmistamento;
+main
 
 refreshCuda();
 setInterval(refreshCuda,5000);

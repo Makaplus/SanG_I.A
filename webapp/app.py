@@ -653,6 +653,7 @@ def api_job():
         return json_ok(job=job)
 
 
+codex/iniziare-progetto-libreria-atti-di-polizia-sri8es
 @app.route("/api/run-revisione-job", methods=["POST"])
 @admin_required
 def api_run_revisione_job():
@@ -705,6 +706,8 @@ def api_run_revisione_job():
     return json_ok(job_id=job_id, mode=mode)
 
 
+=======
+main
 def _tk_pick_file():
     try:
         import tkinter as tk
@@ -1026,6 +1029,7 @@ def api_update_db():
         con.close()
         return json_err("Nessun campo da aggiornare", 400)
 
+codex/iniziare-progetto-libreria-atti-di-polizia-sri8es
     old_nome = None
     nome_col = "nome_file" if "nome_file" in allowed else None
     if nome_col:
@@ -1051,6 +1055,10 @@ def api_update_db():
             os.replace(src_path, dst_path)
             renamed_to = dst_path
 
+=======
+    bkp = backup_file(DOCUMENTI_DB)
+
+main
     set_sql = ", ".join([f"{k}=?" for k in updates.keys()])
     params = list(updates.values())
     params.append(rid)
@@ -1058,7 +1066,11 @@ def api_update_db():
     con.commit()
     con.close()
 
+codex/iniziare-progetto-libreria-atti-di-polizia-sri8es
     return json_ok(backup_path=bkp, updated_fields=list(updates.keys()), renamed_to=renamed_to)
+=======
+    return json_ok(backup_path=bkp, updated_fields=list(updates.keys()))
+main
 
 
 @app.route("/api/documenti/search", methods=["GET"])

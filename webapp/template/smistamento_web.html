@@ -46,7 +46,11 @@
   </div>
 
   <div class="grid5" style="margin-top:10px;">
+codex/iniziare-progetto-libreria-atti-di-polizia-sri8es
     <input id="file" placeholder="nome file">
+=======
+    <input id="file" placeholder="nome file" readonly>
+main
     <input id="anno" placeholder="anno">
     <input id="tipo_documento" placeholder="tipo_documento">
     <input id="rgnr" placeholder="es 4818/06">
@@ -58,7 +62,10 @@
     <button id="saveTipoBtn" class="secondary">Salva Tipo</button>
     <button id="saveRgnrBtn" class="secondary">Salva RGNR</button>
     <button id="saveProcuraBtn" class="secondary">Salva Procura</button>
+codex/iniziare-progetto-libreria-atti-di-polizia-sri8es
     <button id="saveNomeBtn" class="secondary">Salva Nome File</button>
+=======
+main
     <button id="deleteRowBtn" class="danger">🗑 Elimina riga e rimetti file in input</button>
   </div>
   <div class="muted" style="margin-top:8px;">Regola: se un campo è vuoto, NON sovrascrive.</div>
@@ -358,7 +365,10 @@ saveAnnoBtn.onclick = ()=>saveDbField('anno');
 saveTipoBtn.onclick = ()=>saveDbField('tipo_documento');
 saveRgnrBtn.onclick = ()=>saveDbField('rgnr');
 saveProcuraBtn.onclick = ()=>saveDbField('procura');
+codex/iniziare-progetto-libreria-atti-di-polizia-sri8es
 saveNomeBtn.onclick = ()=>saveDbField('nome_file');
+=======
+main
 deleteRowBtn.onclick = deleteSelectedRowAndRequeue;
 
 loadRows(); loadOverrides(); refreshCuda(); setInterval(refreshCuda,5000);

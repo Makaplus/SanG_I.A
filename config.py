@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+codex/iniziare-progetto-libreria-atti-di-polizia-sri8es
 """Configurazione centrale SANGIA (portabile e completa)."""
 
 from __future__ import annotations
@@ -132,6 +133,34 @@ def inizializza_ambiente() -> None:
         DB_SQLITE_PATH.parent,
         KB_JSONL.parent,
     ]:
+=======
+"""Configurazione centrale SANGIA."""
+
+import json
+import logging
+import os
+from pathlib import Path
+
+BASE_DIR = Path(__file__).resolve().parent
+INPUT_DIR = BASE_DIR / "input_documenti"
+LIBRERIA_DIR = BASE_DIR / "libreria"
+MEDIA_CACHE_DIR = BASE_DIR / ".media_cache"
+BIBLIOTECA_DIR = INPUT_DIR / "biblioteca"
+ERROR_DIR = INPUT_DIR / "errore"
+DB_SQLITE_PATH = LIBRERIA_DIR / "documenti.db"
+CARTELLA_DB_VETTORIALE = str(BASE_DIR / "chroma_db")
+
+
+class Settings:
+    SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".png", ".jpg", ".jpeg"}
+    MAX_WORKERS = os.cpu_count() if os.cpu_count() else 4
+    OCR_PRIMARY_LANG = "it"
+    OCR_SECONDARY_LANG = "en"
+
+
+def inizializza_ambiente() -> None:
+    for cartella in [INPUT_DIR, LIBRERIA_DIR, MEDIA_CACHE_DIR, BIBLIOTECA_DIR, ERROR_DIR, Path(CARTELLA_DB_VETTORIALE)]:
+main
         try:
             cartella.mkdir(parents=True, exist_ok=True)
         except OSError as e:

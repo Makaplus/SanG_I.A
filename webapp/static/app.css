@@ -30,13 +30,18 @@ body{
   padding: 0 14px;
 }
 
+codex/iniziare-progetto-libreria-atti-di-polizia-sri8es
 /* --- BANNER responsive: sempre visibile a ogni risoluzione --- */
+=======
+/* --- BANNER: non tagliato, più alto, scende giù --- */
+main
 .banner{
   width:100%;
   background:#000;
   border-bottom:1px solid var(--border);
   box-shadow: 0 10px 30px rgba(0,0,0,0.45);
   overflow:hidden;
+codex/iniziare-progetto-libreria-atti-di-polizia-sri8es
   display:flex;
   justify-content:center;
   align-items:center;
@@ -47,6 +52,12 @@ body{
   max-height: clamp(84px, 16vw, 220px);
   height:auto;
   object-fit:contain;
+=======
+}
+.banner img{
+  width:100%;
+  height:auto;              /* IMPORTANT: niente crop */
+main
   display:block;
   filter: contrast(1.06) saturate(1.05);
 }
@@ -230,6 +241,7 @@ pre{
   grid-template-columns: 2fr 1fr 1.2fr 1.2fr 1.2fr;
   gap:10px;
 }
+codex/iniziare-progetto-libreria-atti-di-polizia-sri8es
 
 
 .responsive-row{ flex-wrap: wrap; }
@@ -258,3 +270,5 @@ pre{
     min-width: 0 !important;
   }
 }
+=======
+main
