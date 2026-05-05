@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}SANG_I.A. - Admin{% endblock %}
+{% block content %}
+<div class="card"><h2>Pannello Admin</h2><div class="muted">Utente: <b>{{username}}</b></div></div>
+<div class="card">
+  <div class="row"><h3 style="margin:0;">Utenti</h3><span class="muted">ricerca + gestione</span></div>
+  <div class="row" style="margin-top:10px;">
+    <input id="qUsers" placeholder="Cerca username..." style="min-width:260px;">
+    <button class="secondary" onclick="loadUsers()">Ricarica</button>
+    <span id="usersMsg" class="muted" style="margin-left:auto;"></span>
+  </div>
+  <table id="usersTable"><thead><tr><th>ID</th><th>Username</th><th>Ruolo</th><th>Attivo</th><th>Creato</th><th>Ultimo login</th><th>Azioni</th></tr></thead><tbody></tbody></table>
+  <div id="usersErr" class="muted" style="margin-top:10px;color:#fca5a5; display:none;"></div>
+</div>
+<script>
+function esc(s){return (s??"").toString().replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;").replaceAll('"',"&quot;").replaceAll("'","&#039;");}
+function showErr(t){const e=document.getElementById('usersErr');e.style.display='block';e.textContent=t;}
+function msg(t){document.getElementById('usersMsg').textContent=t;setTimeout(()=>document.getElementById('usersMsg').textContent='',2000)}
+async function loadUsers(){const r=await fetch('/api/users');const j=await r.json();if(!j.ok){showErr(j.error||'Errore');return;}const tb=document.querySelector('#usersTable tbody');tb.innerHTML='';for(const row of (j.rows||[])){const [id,username,role,is_active,created,last]=row;const tr=document.createElement('tr');tr.innerHTML=`<td>${id}</td><td><b>${esc(username)}</b></td><td><span class='pill'>${esc(role)}</span></td><td>${is_active?'SI':'NO'}</td><td>${esc(created||'')}</td><td>${esc(last||'-')}</td><td><button class='danger' onclick='deleteUser(${id},"${esc(username)}")'>Elimina</button></td>`;tb.appendChild(tr);}}
+async function deleteUser(id,u){if(!confirm(`Eliminare ${u}?`)) return;const r=await fetch(`/api/users/${id}/delete`,{method:'POST'});const j=await r.json();if(!j.ok){showErr(j.error||'Errore');return;}msg('Eliminato');loadUsers();}
+loadUsers();
+</script>
+{% endblock %}

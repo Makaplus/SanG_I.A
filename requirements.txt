@@ -1,0 +1,37 @@
+# SANGIA - ambiente unico (venv)
+# Install consigliato su Windows:
+# python.exe -m pip install -r requirements.txt
+
+# Web app
+flask
+werkzeug
+
+# Ambiente APP/Embedding
+langchain
+langchain-community
+langchain-ollama
+langchain-chroma
+chromadb
+
+# Networking / config
+requests>=2.32.3
+urllib3>=2,<3
+python-dotenv
+
+# Utility / progress
+tqdm
+numpy
+
+# OCR / document parsing
+PyMuPDF
+python-docx
+Pillow
+paddleocr
+chardet
+reportlab
+
+# Windows integration
+pywin32; platform_system == "Windows"
+
+# Compatibility pin
+protobuf==3.20.2
